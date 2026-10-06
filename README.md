@@ -1,22 +1,22 @@
 # Desktop Dock
 
-A lightweight dock for Windows 11. It hides at the top edge of your screen and slides down when you rest the pointer there: your programs, folders and files, one click away. Inspired by the original RocketDock and its creators at Punk Labs ♥
+A lightweight dock for Windows 11. It stays hidden at the top of your screen and slides down when you move your mouse there, keeping your programs, folders and files one click away. Inspired by the original RocketDock and its creators at Punk Labs ♥
 
-![The dock, out at the top of the screen](docs/images/dock.png)
+![Desktop Dock at the top of the screen](docs/images/dock.png)
 
-**[Download the latest release](https://github.com/MichaelPawluk/desktop-dock/releases/latest)** · Windows 11, 64-bit · free and open source (MIT) · use at your own risk
+**[Download the latest release](https://github.com/MichaelPawluk/DesktopDock/releases/latest)** · Windows 11, 64-bit · free and open source (MIT) · use at your own risk
 
-## What it does
+## Features
 
-- **Out of the way until you want it:** rest the pointer at the top edge and it slides down; icons zoom as you point at them and show their names. It stays hidden over fullscreen games and videos.
-- **Drag things on:** files, folders, programs and links from Explorer, the Start menu or a browser. Drop files on a program to open them with it, or on the Recycle Bin to recycle them.
-- **Groups:** keep related things together in one icon that opens a pop-up.
-- **Windows' own places:** This PC, Downloads, Control Panel, Settings, Show desktop and more.
-- **Hard to lose things:** Undo after every change, a list of what you removed recently, and automatic versions of your dock to go back to.
-- **Fixes itself:** when an update moves a program (Photoshop 2026 becoming 2027, say), the dock finds it again.
-- **Coming from RocketDock:** import your old dock, icons and all.
-- **Light or dark:** follows Windows, with an optional glow in your accent colour.
-- **Light on your PC:** about 9 MB of memory, no network access, no telemetry.
+- **Out of the way until you need it:** move your mouse to the top of the screen and the dock slides down. Icons grow as you hover over them and show their names. It stays hidden while you're in a fullscreen game or video.
+- **Drag and drop:** add files, folders, programs and links by dragging them from File Explorer, the Start menu or a browser. Drop a file on a program's icon to open it with that program, or on the Recycle Bin to delete it.
+- **Groups:** put related items together under one icon that opens a pop-up.
+- **Windows items:** add This PC, Downloads, Control Panel, Settings, Show desktop and more.
+- **Hard to break:** every change can be undone, recently removed items can be put back, and your dock is backed up automatically.
+- **Finds moved programs:** when an update moves a program, for example Photoshop 2026 being replaced by Photoshop 2027, the dock finds the new version on its own.
+- **Easy switch from RocketDock:** import your existing RocketDock setup, icons and all.
+- **Light or dark:** matches your Windows theme, with an optional hover glow in your accent colour.
+- **Lightweight:** uses about 9 MB of memory, never goes online and collects no data.
 
 <p align="center">
   <img src="docs/images/group.png" alt="A group's pop-up" width="49%">
@@ -29,61 +29,61 @@ A lightweight dock for Windows 11. It hides at the top edge of your screen and s
 
 ## Install
 
-**Needs** Windows 11, 64-bit (x64). Nothing else to install, and no administrator rights.
+**Requirements:** Windows 11, 64-bit (x64). No other software or administrator rights are needed.
 
-1. Download `DesktopDock-<version>.zip` from [Releases](https://github.com/MichaelPawluk/desktop-dock/releases/latest) and unzip it.
-2. Open `desktop-dock.exe` and click **Install**.
+1. Download `DesktopDock-<version>.zip` from [Releases](https://github.com/MichaelPawluk/DesktopDock/releases/latest) and unzip it.
+2. Run `desktop-dock.exe` and click **Install**.
 
-The program isn't signed (that costs money every year), so Windows warns first: "Unknown Publisher" (click **Run**), or "Windows protected your PC" (click **More info**, then **Run anyway**).
+The program isn't digitally signed (a code-signing certificate costs money every year), so Windows shows a warning the first time you run it. If you see "Unknown Publisher", click **Run**. If you see "Windows protected your PC", click **More info**, then **Run anyway**.
 
-It installs just for you, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or a folder you pick with Change…), with a Start menu entry and an entry in Settings > Apps > Installed apps. It starts with Windows unless you untick that.
+Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or another folder you choose with **Change…**). It adds a Start menu shortcut and an entry in Settings > Apps > Installed apps, and starts with Windows unless you untick that option.
 
 ![Setup](docs/images/setup.png)
 
-- **Update:** open a newer `desktop-dock.exe` and click Update. Your dock stays exactly as it is.
-- **Getting back in:** if you've exited the dock, start Desktop Dock from the Start menu. Starting it while it's running opens Dock settings.
-- **Uninstall:** Settings > Apps > Installed apps > Desktop Dock > Uninstall. Your dock is kept for next time, unless you tick *Also remove my dock*.
+- **Updating:** run the newer `desktop-dock.exe` and click **Update**. Your icons and settings are kept.
+- **If you closed the dock:** start Desktop Dock from the Start menu. Starting it while it's already running opens its settings.
+- **Uninstalling:** Settings > Apps > Installed apps > Desktop Dock > Uninstall. Your dock is kept in case you reinstall, unless you tick *Also remove my dock*.
 
-## Using it
+## How to use it
 
 - **Open something:** click its icon.
-- **Add things:** drag them onto the dock, or right-click > Add (File, Folder, Separator, Recycle Bin, or a Windows item).
-- **Arrange:** drag icons along the dock. Drag one off the dock to remove it; Undo appears for a few seconds, and right-click > Put back brings back anything removed recently.
-- **Groups:** right-click an icon > Move to group > New group, or drag an icon onto a group. Click a group to open it; drag items in, out and around inside it.
-- **Lock icons:** right-click > Lock icons stops accidental dragging. Hold Ctrl to move one anyway.
-- **From the keyboard:** set a shortcut in Dock settings > Screen (say Ctrl+Shift+D) to bring the dock out; press it again, or Esc, to send it back up.
-- **Change an icon:** right-click > Change icon... (your own images, the program's icons, or Windows' icons).
-- **Everything else:** right-click > Dock settings...
+- **Add something:** drag it onto the dock, or right-click the dock and choose Add (File, Folder, Separator, Recycle Bin, or a Windows item).
+- **Rearrange:** drag icons to new spots. To remove one, drag it off the dock. An Undo button appears for a few seconds, and right-click > Put back restores anything removed recently.
+- **Groups:** right-click an icon > Move to group > New group, or drag an icon onto an existing group. Click a group to open it, then drag items in, out or around inside it.
+- **Lock icons:** right-click > Lock icons prevents accidental dragging. Hold Ctrl to move an icon anyway.
+- **Keyboard shortcut:** set one in Dock settings > Screen (for example Ctrl+Shift+D) to show the dock. Press it again, or Esc, to hide it.
+- **Change an icon:** right-click > Change icon… and pick your own image, one of the program's icons, or a Windows icon.
+- **Everything else:** right-click > Dock settings…
 
-Dock settings shows each change on the dock as you make it, and **Revert all changes** puts your dock back as it was when the window opened. Its pages: Look, Behaviour, Screen, Items, Recently removed, Versions, Files and About.
+Changes in Dock settings show on the dock straight away, and **Revert all changes** puts everything back the way it was when you opened the window. The settings are split into Look, Behaviour, Screen, Items, Recently removed, Versions, Files and About.
 
-## Coming from RocketDock
+## Switching from RocketDock
 
-Dock settings > Files > **Import from RocketDock**: from RocketDock on this PC, or from a `.reg` export of its settings (`reg export HKCU\Software\RocketDock rocketdock.reg`). Your icons, their order and the dock's sizes and timings come across; your current dock is kept in Versions first.
+Go to Dock settings > Files > **Import from RocketDock**. You can import straight from RocketDock on this PC, or from a `.reg` export of its settings (`reg export HKCU\Software\RocketDock rocketdock.reg`). Your icons, their order, and RocketDock's sizes and timings are brought over. Your current dock is saved in Versions first, so you can always go back.
 
-## Where things live
+## Where your files are
 
-Everything is in the folder it's installed in:
+Everything is kept in the install folder:
 
 | | |
 |---|---|
 | `desktop-dock.exe` | the program |
-| `dock.toml` | your dock: its items and settings, in plain text ([format](docs/config-format.md)); hand edits are picked up when you save |
-| `backups\` | automatic versions and snapshots |
-| `removed.toml` | Recently removed |
-| `shortcuts\` | copies of shortcuts you dropped on the dock, so they keep working if the original goes |
-| `cache\icons\` | icons, made once at the right size (safe to clear) |
-| `logs\` | what the dock did (the last 512 KB) |
+| `dock.toml` | your dock's items and settings, in plain text ([format](docs/config-format.md)); changes you make by hand are picked up when you save the file |
+| `backups\` | automatic backups and snapshots |
+| `removed.toml` | items you removed recently |
+| `shortcuts\` | copies of shortcuts you dropped on the dock, so they keep working if the original is deleted |
+| `cache\icons\` | cached icons (safe to delete) |
+| `logs\` | a log of what the dock did (the most recent 512 KB) |
 
 ## Known issues
 
-- Pressing Esc at the very moment you let go of a dragged icon, while another program's message is in front and takes the Esc, can move the icon instead of cancelling. Undo puts it back.
-- If `dock.toml` is changed by hand during a drag, the drop lands on the changed file instead of cancelling the drag. Your edit is kept, and Undo is offered.
-- Windows on ARM isn't tested.
+- If you press Esc at the exact moment you drop an icon, while another program's message box is in front and catches the keypress, the icon may be moved instead of the drag being cancelled. Undo puts it back.
+- If `dock.toml` is edited by hand while you're dragging an icon, the move is applied to the edited file instead of the drag being cancelled. Your edit is kept, and Undo is available.
+- Windows on ARM hasn't been tested.
 
 ## Building from source
 
-You need Rust (stable) and Visual Studio's C++ build tools, for the Windows SDK's resource compiler.
+You'll need Rust (stable) and the Visual Studio C++ build tools (for the Windows SDK's resource compiler).
 
 ```
 cargo build --release      # target\release\desktop-dock.exe
@@ -91,8 +91,8 @@ cargo test
 .\tools\package.ps1        # the release: dist\DesktopDock-<version>.zip
 ```
 
-`tools\package.ps1` builds reproducibly: the same source, built with the same Rust and Visual Studio versions (listed in each release's notes), gives a byte-identical `desktop-dock.exe`, so you can check a release against its source with the SHA-256 published beside it.
+Builds are reproducible: the same source, built with the same Rust and Visual Studio versions (listed in each release's notes), produces a byte-identical `desktop-dock.exe`. You can check a release against its source using the SHA-256 published with it.
 
 ## Licence
 
-MIT: see [LICENSE](LICENSE). Desktop Dock is provided as is, without warranty of any kind; you use it at your own risk. It is not affiliated with RocketDock or Punk Labs. The open-source libraries it is built with, and their licences, are listed in `THIRD-PARTY-NOTICES.txt` in each release.
+MIT. See [LICENSE](LICENSE). Desktop Dock is provided as is, without warranty of any kind, so use it at your own risk. It isn't affiliated with RocketDock or Punk Labs. The open-source libraries it uses, and their licences, are listed in `THIRD-PARTY-NOTICES.txt` in each release.

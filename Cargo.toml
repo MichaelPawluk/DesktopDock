@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 description = "A lightweight dock for Windows 11, in the spirit of RocketDock"
 license = "MIT"
-repository = "https://github.com/MichaelPawluk/desktop-dock"
+repository = "https://github.com/MichaelPawluk/DesktopDock"
 readme = "README.md"
 
 [dependencies]
