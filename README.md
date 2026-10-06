@@ -1,6 +1,6 @@
 # Desktop Dock
 
-A lightweight dock for Windows 11. It stays hidden at the top of your screen and slides down when you move your mouse there, keeping your programs, folders and files one click away. Inspired by the original RocketDock and its creators at Punk Labs ♥
+A lightweight dock for Windows 11. It stays hidden at the top of your screen and slides down on demand, keeping your programs, folders and files one click away. Inspired by the original RocketDock and its creators at Punk Labs ♥
 
 ![Desktop Dock at the top of the screen](docs/images/dock.png)
 
