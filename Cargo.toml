@@ -1,0 +1,68 @@
+[package]
+name = "desktop-dock"
+version = "1.0.0"
+edition = "2024"
+description = "A lightweight dock for Windows 11, in the spirit of RocketDock"
+license = "MIT"
+repository = "https://github.com/MichaelPawluk/desktop-dock"
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+windows-numerics = "0.3.1"
+# The #[implement] macro (the dock's drop target) expands to windows_core paths.
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+toml_edit = "0.25.15"
+
+[features]
+# Behaviour broken on purpose, switched by break.txt, for proving the VM tests fail when it
+# breaks (src/breaks.rs, tools/vm-kit.ps1 -Mutants). Never in a build that ships.
+test-break = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[build-dependencies]
+embed-resource = "3.0.11"

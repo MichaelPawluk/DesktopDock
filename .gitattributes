@@ -1,0 +1,2 @@
+# RocketDock exports are UTF-16: never convert line endings.
+*.reg binary

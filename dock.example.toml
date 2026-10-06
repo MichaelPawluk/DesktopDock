@@ -1,0 +1,65 @@
+# An example dock.toml, showing every setting. (A new dock writes its own: This PC, your
+# Documents, Downloads, Pictures, Music and Videos, and the Recycle Bin.) Everything here can be
+# changed in Dock settings; the dock saves this file as you go and picks up hand edits too.
+# Single-quoted paths need no escaping of backslashes. %VARIABLES% are expanded.
+
+version = 1
+
+[dock]
+icon_size = 53              # pixels at 100% scaling; the dock shrinks to fit a narrow screen
+zoom_size = 64              # how big the icon under the pointer grows
+zoom_ms = 120               # how long the zoom takes
+spacing = 10                # space between icons
+popup_delay_ms = 350        # rest at the top edge this long before the dock comes out
+hide_delay_ms = 250         # how long it stays after the pointer leaves
+slide_in_ms = 250           # 0 = appear at once
+slide_out_ms = 250          # 0 = vanish at once
+show_labels = true          # the name under the icon you point at
+label_size = 12.5           # the name's size in pixels (halves allowed)
+background_opacity = 100    # percent; 0 = icons only
+icon_opacity = 100          # percent; the icon under the pointer is always solid
+look = "light"              # "light" or "dark"
+hover_glow = "none"         # "none", "accent" (Windows' accent colour) or "icon" (each icon's own)
+monitor = "main"             # the screen: "main" (Windows' main screen), or the one chosen in Settings > Screen
+hotkey = ""                  # a keyboard shortcut that brings the dock out, like "Ctrl+Shift+D"; "" for none
+launch_effect = "bounce"    # "bounce", "glow" or "none"
+locked = false              # true: no dragging icons around (hold Ctrl to move one anyway)
+
+[[item]]
+name = 'This PC'
+target = '::{20D04FE0-3AEA-1069-A2D8-08002B30309D}'
+
+[[item]]
+kind = "separator"
+
+[[item]]
+name = 'Documents'
+target = '%USERPROFILE%\Documents'
+
+[[item]]
+name = 'Notepad'
+target = 'C:\Windows\System32\notepad.exe'
+args = ''                   # arguments for the program
+start_in = ''               # its working folder (empty: the program's own)
+icon = ''                   # an image (.png, .ico, ...) or 'file.dll,index'; empty: the program's own
+run = "normal"              # "normal", "minimized" or "maximized"
+admin = false               # true: run as administrator (Windows asks)
+
+[[item]]
+kind = "group"
+name = 'Tools'
+
+[[item.items]]
+name = 'Settings'
+target = 'shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel'
+
+[[item.items]]
+name = 'Control Panel'
+target = '::{26EE0668-A00A-44D7-9371-BEB064C98683}'
+
+[[item]]
+kind = "separator"
+
+[[item]]
+kind = "recycle-bin"
+name = 'Recycle Bin'

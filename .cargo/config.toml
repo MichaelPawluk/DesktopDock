@@ -1,0 +1,5 @@
+# Built to run on any Windows 10 or 11 PC: the C runtime goes into the exe, so it doesn't need
+# Microsoft's Visual C++ Redistributable (a fresh Windows has no VCRUNTIME140.dll). tools\package.ps1
+# sets its own flags, so it adds this one too.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

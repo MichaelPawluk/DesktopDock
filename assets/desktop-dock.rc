@@ -1,0 +1,317 @@
+// Resources built into desktop-dock.exe (see build.rs).
+#include <winres.h>
+#include <commctrl.h>
+
+1 ICON "dock.ico"
+1 RT_MANIFEST "desktop-dock.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION VER_MAJOR,VER_MINOR,VER_PATCH,0
+PRODUCTVERSION VER_MAJOR,VER_MINOR,VER_PATCH,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Desktop Dock"
+      VALUE "ProductName", "Desktop Dock"
+      VALUE "FileVersion", VER_STRING
+      VALUE "ProductVersion", VER_STRING
+      VALUE "OriginalFilename", "desktop-dock.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+
+// ---- The settings window (desktop-dock.exe --settings; see src/settings.rs) -------------------
+// Sizes are in dialog units: Windows scales them for the display, at any DPI. Control numbers
+// must match the constants in src/settings.rs.
+
+// The window: sections on the left (drawn by the window, Windows 11 style), the section's
+// title and its page on the right (page area 94,26 - 464,272: pages are 370 x 246). At most
+// 300 units tall, so it fits a 1080-line laptop screen at 150% (a unit test checks every page).
+100 DIALOGEX 0, 0, 470, 300
+STYLE DS_SHELLFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "Desktop Dock settings"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  CONTROL         "", 1001, "ListBox", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_TABSTOP, 4, 6, 84, 288
+  LTEXT           "", 1004, 94, 4, 370, 20
+  LTEXT           "Changes show on the dock as you make them.", 1002, 94, 277, 222, 18
+  PUSHBUTTON      "Revert all changes", 1003, 322, 280, 78, 14
+  PUSHBUTTON      "Close", IDCANCEL, 406, 280, 58, 14
+END
+
+// Items: every item on the dock, and the selected one's properties.
+101 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  CONTROL         "", 1101, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER | WS_BORDER | WS_TABSTOP, 0, 0, 140, 210
+  PUSHBUTTON      "Add...", 1102, 0, 214, 34, 14
+  PUSHBUTTON      "Remove", 1103, 36, 214, 36, 14
+  PUSHBUTTON      "Up", 1104, 74, 214, 32, 14
+  PUSHBUTTON      "Down", 1105, 108, 214, 32, 14
+  PUSHBUTTON      "Group...", 1106, 0, 231, 68, 14
+
+  LTEXT           "Name", -1, 150, 3, 50, 10
+  EDITTEXT        1110, 205, 1, 165, 13, ES_AUTOHSCROLL
+  LTEXT           "Target", -1, 150, 21, 50, 10
+  EDITTEXT        1111, 205, 19, 120, 13, ES_AUTOHSCROLL
+  PUSHBUTTON      "Browse...", 1112, 328, 18, 42, 14
+  LTEXT           "Arguments", -1, 150, 39, 50, 10
+  EDITTEXT        1113, 205, 37, 165, 13, ES_AUTOHSCROLL
+  LTEXT           "Start in", -1, 150, 57, 50, 10
+  EDITTEXT        1114, 205, 55, 120, 13, ES_AUTOHSCROLL
+  PUSHBUTTON      "Browse...", 1115, 328, 54, 42, 14
+  LTEXT           "Run", -1, 150, 75, 50, 10
+  COMBOBOX        1116, 205, 73, 78, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  PUSHBUTTON      "Open file location", 1122, 287, 72, 83, 14
+  AUTOCHECKBOX    "Run as administrator", 1117, 205, 91, 120, 12
+  LTEXT           "Icon", -1, 150, 113, 50, 10
+  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 205, 109, 40, 40
+  PUSHBUTTON      "Change...", 1119, 252, 110, 64, 14
+  PUSHBUTTON      "Default icon", 1120, 252, 127, 64, 14
+  LTEXT           "", 1121, 150, 158, 220, 40
+END
+
+// One item's properties (right-click an icon > Properties...). The same control numbers as the
+// Items page, so the same code fills and saves them. The title becomes "<name> properties".
+102 DIALOGEX 0, 0, 236, 214
+STYLE DS_SHELLFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "Properties"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Name", -1, 7, 9, 50, 10
+  EDITTEXT        1110, 62, 7, 167, 13, ES_AUTOHSCROLL
+  LTEXT           "Target", -1, 7, 27, 50, 10
+  EDITTEXT        1111, 62, 25, 122, 13, ES_AUTOHSCROLL
+  PUSHBUTTON      "Browse...", 1112, 187, 24, 42, 14
+  LTEXT           "Arguments", -1, 7, 45, 50, 10
+  EDITTEXT        1113, 62, 43, 167, 13, ES_AUTOHSCROLL
+  LTEXT           "Start in", -1, 7, 63, 50, 10
+  EDITTEXT        1114, 62, 61, 122, 13, ES_AUTOHSCROLL
+  PUSHBUTTON      "Browse...", 1115, 187, 60, 42, 14
+  LTEXT           "Run", -1, 7, 81, 50, 10
+  COMBOBOX        1116, 62, 79, 78, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  PUSHBUTTON      "Open file location", 1122, 146, 78, 83, 14
+  AUTOCHECKBOX    "Run as administrator", 1117, 62, 97, 120, 12
+  LTEXT           "Icon", -1, 7, 119, 50, 10
+  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 62, 115, 40, 40
+  PUSHBUTTON      "Change...", 1119, 109, 116, 64, 14
+  PUSHBUTTON      "Default icon", 1120, 109, 133, 64, 14
+  LTEXT           "", 1121, 7, 160, 222, 10, SS_PATHELLIPSIS
+  LTEXT           "Changes show on the dock as you make them.", 1002, 7, 174, 222, 18
+  PUSHBUTTON      "Revert", 1003, 126, 194, 50, 14
+  PUSHBUTTON      "Close", IDCANCEL, 179, 194, 50, 14
+END
+
+// Look: the dock's sizes and appearance, under headings (1098: drawn semibold). Sliders show
+// their value on the right (slider + 1).
+103 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Size", 1098, 0, 0, 300, 11
+  LTEXT           "Icon size", -1, 0, 16, 84, 10
+  CONTROL         "", 1301, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 13, 220, 16
+  LTEXT           "", 1302, 310, 16, 60, 10
+  LTEXT           "Zoom size", -1, 0, 34, 84, 10
+  CONTROL         "", 1303, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 31, 220, 16
+  LTEXT           "", 1304, 310, 34, 60, 10
+  LTEXT           "Spacing", -1, 0, 52, 84, 10
+  CONTROL         "", 1305, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 49, 220, 16
+  LTEXT           "", 1306, 310, 52, 60, 10
+  LTEXT           "Names", 1098, 0, 70, 300, 11
+  AUTOCHECKBOX    "Show the name under the icon you point at", 1307, 90, 83, 220, 12
+  LTEXT           "Name size", -1, 0, 100, 84, 10
+  CONTROL         "", 1308, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 97, 220, 16
+  LTEXT           "", 1309, 310, 100, 60, 10
+  LTEXT           "Appearance", 1098, 0, 118, 300, 11
+  LTEXT           "Background opacity", -1, 0, 134, 84, 10
+  CONTROL         "", 1310, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 131, 220, 16
+  LTEXT           "", 1311, 310, 134, 60, 10
+  LTEXT           "Icon opacity", -1, 0, 152, 84, 10
+  CONTROL         "", 1312, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 149, 220, 16
+  LTEXT           "", 1313, 310, 152, 60, 10
+  LTEXT           "Style", -1, 0, 170, 84, 10
+  COMBOBOX        1315, 90, 168, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Effects", 1098, 0, 188, 300, 11
+  LTEXT           "Hover glow", -1, 0, 204, 84, 10
+  COMBOBOX        1316, 90, 202, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Launch effect", -1, 0, 222, 84, 10
+  COMBOBOX        1314, 90, 220, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Sizes are saved when you let go of the slider. The icon you point at is always fully solid.", -1, 0, 237, 365, 9
+END
+
+// Behaviour: timings, Lock icons, Start with Windows, under headings.
+104 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Timing", 1098, 0, 0, 300, 11
+  LTEXT           "Show after", -1, 0, 16, 84, 10
+  CONTROL         "", 1401, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 13, 220, 16
+  LTEXT           "", 1402, 310, 16, 60, 10
+  LTEXT           "Hide after", -1, 0, 34, 84, 10
+  CONTROL         "", 1403, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 31, 220, 16
+  LTEXT           "", 1404, 310, 34, 60, 10
+  LTEXT           "Slide in", -1, 0, 52, 84, 10
+  CONTROL         "", 1405, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 49, 220, 16
+  LTEXT           "", 1406, 310, 52, 60, 10
+  LTEXT           "Slide out", -1, 0, 70, 84, 10
+  CONTROL         "", 1407, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 67, 220, 16
+  LTEXT           "", 1408, 310, 70, 60, 10
+  LTEXT           "Zoom time", -1, 0, 88, 84, 10
+  CONTROL         "", 1409, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 85, 220, 16
+  LTEXT           "", 1410, 310, 88, 60, 10
+  LTEXT           "Editing and startup", 1098, 0, 110, 300, 11
+  AUTOCHECKBOX    "Lock icons", 1411, 90, 125, 200, 12
+  LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 102, 138, 263, 18
+  AUTOCHECKBOX    "Start with Windows", 1412, 90, 159, 200, 12
+  LTEXT           "Show after: how long the pointer rests at the top edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 182, 365, 20
+END
+
+// Screen: which screen the dock is on, what to know about its top edge, and a keyboard
+// shortcut that brings the dock out.
+112 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Where the dock is", 1098, 0, 0, 300, 11
+  LTEXT           "Show the dock on", -1, 0, 17, 84, 10
+  COMBOBOX        2101, 90, 14, 220, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+  LTEXT           "", 2102, 90, 32, 275, 30
+  LTEXT           "Keyboard shortcut", 1098, 0, 68, 300, 11
+  LTEXT           "Show the dock with", -1, 0, 85, 84, 10
+  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 83, 140, 12
+  PUSHBUTTON      "Clear", 2104, 236, 82, 50, 14
+  LTEXT           "", 2105, 90, 100, 275, 20
+  LTEXT           "Press the shortcut again, or Esc, to send the dock back up. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 122, 365, 20
+END
+
+// Recently removed: the last 20 items taken off the dock; put one back, or forget them.
+105 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Items you removed, newest first (the last 20). Put one back and it returns where it was, in its group if it was in one.", -1, 0, 0, 365, 18
+  CONTROL         "", 1501, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 22, 370, 200
+  PUSHBUTTON      "Put back", 1502, 0, 228, 60, 14
+  PUSHBUTTON      "Forget", 1503, 64, 228, 60, 14
+  PUSHBUTTON      "Clear the list", 1504, 128, 228, 66, 14
+END
+
+// Versions: dock.toml's backups, to look back at and restore.
+106 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Your dock is saved automatically before changes (the last 20, at most one a minute) and once a day (the last 7). Snapshots are kept until you delete them from the backups folder. Before restoring, your current dock is saved as a snapshot.", -1, 0, 0, 365, 28
+  CONTROL         "", 1601, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 30, 370, 192
+  PUSHBUTTON      "Restore", 1602, 0, 228, 60, 14
+  PUSHBUTTON      "Save a snapshot", 1603, 64, 228, 76, 14
+  PUSHBUTTON      "Open backups folder", 1604, 144, 228, 88, 14
+END
+
+// Files: where the dock keeps its things.
+107 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Dock folder", -1, 0, 4, 80, 10
+  EDITTEXT        1701, 84, 2, 286, 13, ES_AUTOHSCROLL | ES_READONLY
+  LTEXT           "", 1702, 84, 20, 286, 20
+  PUSHBUTTON      "Open dock folder", 1703, 84, 42, 92, 14
+  PUSHBUTTON      "Edit dock.toml", 1704, 180, 42, 92, 14
+  PUSHBUTTON      "Reload the dock", 1705, 276, 42, 92, 14
+  PUSHBUTTON      "Clear icon cache", 1706, 84, 62, 92, 14
+  LTEXT           "The dock remakes icons as it needs them.", -1, 180, 65, 188, 10
+  LTEXT           "Move your dock", 1098, 0, 96, 300, 11
+  LTEXT           "Save a copy of your dock's items and settings, to keep or to use on another PC, and load one back in (your dock as it is now is kept in Versions first). Coming from RocketDock? Bring its icons and settings over.", -1, 0, 111, 365, 20
+  PUSHBUTTON      "Save a copy...", 1707, 0, 134, 80, 14
+  PUSHBUTTON      "Load a copy...", 1708, 84, 134, 80, 14
+  PUSHBUTTON      "Import from RocketDock...", 1709, 168, 134, 110, 14
+END
+
+// The icon picker: a grid of icons (your icons folder, the program's, Windows'), with a search.
+// Clicking one shows it on the dock; the title becomes "Choose an icon for <name>".
+108 DIALOGEX 0, 0, 400, 260
+STYLE DS_SHELLFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Choose an icon"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT           "Show", -1, 7, 9, 24, 10
+  COMBOBOX        1801, 34, 7, 170, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+  LTEXT           "Search", -1, 222, 9, 28, 10
+  EDITTEXT        1802, 252, 7, 141, 13, ES_AUTOHSCROLL
+  CONTROL         "", 1803, "SysListView32", LVS_ICON | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_AUTOARRANGE | WS_BORDER | WS_TABSTOP, 7, 26, 386, 188
+  LTEXT           "", 1806, 7, 219, 386, 10, SS_ENDELLIPSIS
+  PUSHBUTTON      "Browse...", 1804, 7, 239, 60, 14
+  PUSHBUTTON      "Default icon", 1805, 71, 239, 64, 14
+  DEFPUSHBUTTON   "Use this icon", IDOK, 280, 239, 60, 14
+  PUSHBUTTON      "Cancel", IDCANCEL, 343, 239, 50, 14
+END
+
+// About: the version, what the dock is using right now, and its log.
+109 DIALOGEX 0, 0, 370, 246
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  CONTROL         "", 1901, "Static", SS_ICON | SS_REALSIZEIMAGE, 0, 2, 32, 32
+  LTEXT           "Desktop Dock", 1902, 44, 4, 300, 14
+  LTEXT           "", 1903, 44, 20, 300, 10
+  LTEXT           "A lightweight, productivity-focused dock for your desktop.", -1, 0, 44, 365, 10
+  LTEXT           "Inspired by the original RocketDock and its creators at Punk Labs", 1907, 0, 56, 300, 10
+  LTEXT           "", 1908, 300, 56, 12, 10
+  LTEXT           "Memory", 1098, 0, 74, 300, 11
+  LTEXT           "", 1904, 0, 89, 365, 28
+  LTEXT           "Log", 1098, 0, 124, 300, 11
+  LTEXT           "What the dock did, and anything that went wrong, is written to its log (the last 512 KB are kept).", -1, 0, 139, 365, 12
+  PUSHBUTTON      "Open the log", 1906, 0, 155, 70, 14
+END
+
+// Setup: shown when the exe runs from anywhere but its install folder (src/setup.rs). The
+// text and the Install button's name are set for a new install, an update or a reinstall;
+// once it's installed the same window says so (the location, tick box and bar are hidden).
+110 DIALOGEX 0, 0, 280, 178
+STYLE DS_SHELLFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "Desktop Dock setup"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  CONTROL         "", 2001, "Static", SS_ICON | SS_REALSIZEIMAGE, 10, 10, 32, 32
+  LTEXT           "Desktop Dock", 2002, 52, 10, 220, 16
+  LTEXT           "", 2003, 52, 30, 220, 28
+  LTEXT           "Install to", 2006, 52, 62, 220, 10
+  LTEXT           "", 2007, 52, 76, 166, 10, SS_PATHELLIPSIS | SS_NOPREFIX
+  PUSHBUTTON      "Change...", 2008, 222, 73, 50, 14
+  LTEXT           "", 2009, 52, 90, 220, 18
+  AUTOCHECKBOX    "Start with Windows", 2004, 52, 109, 200, 12
+  CONTROL         "", 2010, "msctls_progress32", NOT WS_VISIBLE, 52, 126, 220, 8
+  LTEXT           "", 2005, 52, 137, 220, 18
+  DEFPUSHBUTTON   "Install", IDOK, 146, 158, 70, 14
+  PUSHBUTTON      "Cancel", IDCANCEL, 220, 158, 52, 14
+END
+
+// Uninstall: from Settings > Apps > Installed apps (desktop-dock.exe --uninstall).
+111 DIALOGEX 0, 0, 280, 120
+STYLE DS_SHELLFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "Remove Desktop Dock"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  CONTROL         "", 2001, "Static", SS_ICON | SS_REALSIZEIMAGE, 10, 10, 32, 32
+  LTEXT           "Remove Desktop Dock?", 2002, 52, 10, 220, 16
+  LTEXT           "Removes Desktop Dock, its Start menu shortcut and its icon cache. Your dock (its items, settings and backups) stays, so installing again brings it back.", 2003, 52, 30, 220, 36
+  AUTOCHECKBOX    "Also remove my dock", 2004, 52, 72, 200, 12
+  DEFPUSHBUTTON   "Remove", IDOK, 156, 98, 60, 14
+  PUSHBUTTON      "Cancel", IDCANCEL, 220, 98, 52, 14
+END
