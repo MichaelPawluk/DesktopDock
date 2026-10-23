@@ -4,7 +4,7 @@
 use crate::{log_info, log_warn};
 use std::ffi::c_void;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WAIT_ABANDONED,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WAIT_ABANDONED,
     WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
@@ -14,8 +14,8 @@ use windows::Win32::System::RemoteDesktop::{NOTIFY_FOR_THIS_SESSION, WTSRegister
 use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
 use windows::Win32::System::Threading::OpenProcessToken;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteValueW, RegGetValueW,
 };
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
@@ -27,7 +27,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, FindWindowW, GUI_INMOVESIZE, GUITHREADINFO, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetGUIThreadInfo, GetSystemMetrics, GetWindowRect, IsZoomed, SM_SWAPBUTTON,
+    GetGUIThreadInfo, GetSystemMetrics, GetWindowRect, IsWindowVisible, IsZoomed, SM_SWAPBUTTON,
     MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, PostMessageW, RegisterWindowMessageW,
     SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_CLOSE, WTS_CONSOLE_CONNECT,
     WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
@@ -111,10 +111,9 @@ pub fn quit_running_dock() -> bool {
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("Desktop Dock");
-/// Where Windows keeps Startup apps' on/off switches (Settings > Apps > Startup, Task Manager).
+/// Where Windows keeps Startup apps' on/off switches (Settings > Apps > Startup, Task Manager):
+/// an odd first byte is "off".
 const APPROVED_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run");
-/// What Windows writes there for "on" (an odd first byte is "off").
-const APPROVED_ON: [u8; 12] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// The installed copy, wherever setup put it (the usual place, or a folder you chose): the one
 /// that starts with Windows.
@@ -128,14 +127,10 @@ pub fn installed_exe() -> Option<std::path::PathBuf> {
 /// it again otherwise does.
 pub const STARTUP_FLAG: &str = "--startup";
 
-/// The command Windows runs at sign-in: always the installed copy, whichever copy asks, so a
+/// The program Windows starts at sign-in: always the installed copy, whichever copy asks, so a
 /// development build never takes over your sign-in. A portable copy (not in a build folder)
 /// registers itself if nothing is installed.
-fn startup_command() -> Result<String, String> {
-    startup_exe().map(|exe| format!("\"{}\" {STARTUP_FLAG}", exe.display()))
-}
-
-fn startup_exe() -> Result<std::path::PathBuf, String> {
+pub fn startup_exe() -> Result<std::path::PathBuf, String> {
     let exe = match installed_exe() {
         Some(installed) => installed,
         None => {
@@ -192,13 +187,18 @@ pub fn read_user_text(path: &str, name: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&wide))
 }
 
-/// True if the installed dock starts with Windows: its Run entry is there, and Windows' Startup
-/// apps switch for it isn't off.
-pub fn starts_with_windows() -> bool {
+/// An entry in Windows' startup list (the Run key) for the dock, as versions before 1.0.1 used
+/// for Start with Windows (see `startup`): there, whatever it says.
+pub fn run_entry_exists() -> bool {
+    read_value(RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ).is_some()
+}
+
+/// That entry starts this installed dock, and Windows' Startup apps switch for it isn't off.
+pub fn run_entry_is_on() -> bool {
     let Some(bytes) = read_value(RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ) else { return false };
     let wide: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).take_while(|&c| c != 0).collect();
     let value = String::from_utf16_lossy(&wide);
-    // Ours as written now, or as earlier versions wrote it (the program alone).
+    // As 1.0 wrote it, or as earlier versions did (the program alone).
     let ours = startup_exe().is_ok_and(|exe| {
         let value = value.trim();
         value.eq_ignore_ascii_case(&format!("\"{}\" {STARTUP_FLAG}", exe.display())) || value.eq_ignore_ascii_case(&format!("\"{}\"", exe.display()))
@@ -207,45 +207,16 @@ pub fn starts_with_windows() -> bool {
     ours && !switched_off
 }
 
-/// Adds or removes the per-user Run entry, with Windows' Startup apps switch set to match:
-/// Windows 11 can skip an entry that has no switch record at all. No admin
-/// needed; you can also switch it off in Settings > Apps > Startup.
-pub fn set_starts_with_windows(on: bool) -> Result<(), String> {
-    if on && crate::breaks::broken("startup.not-written") {
-        return Ok(());
-    }
-    let command = if on { Some(startup_command()?) } else { None };
+/// Takes that entry away, with its Startup apps switch.
+pub fn remove_run_entry() {
     unsafe {
-        let open = |path: PCWSTR| -> Result<HKEY, String> {
+        for path in [RUN_KEY, APPROVED_KEY] {
             let mut key = HKEY::default();
-            let status = RegCreateKeyExW(HKEY_CURRENT_USER, path, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None);
-            if status == ERROR_SUCCESS { Ok(key) } else { Err("Windows' list of programs to start couldn't be opened.".into()) }
-        };
-        let run = open(RUN_KEY)?;
-        let approved = open(APPROVED_KEY);
-        let status = match &command {
-            Some(command) => {
-                let wide: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
-                let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
-                let status = RegSetValueExW(run, RUN_VALUE, None, REG_SZ, Some(bytes));
-                if let Ok(approved) = approved {
-                    let _ = RegSetValueExW(approved, RUN_VALUE, None, REG_BINARY, Some(&APPROVED_ON));
-                }
-                status
+            if RegCreateKeyExW(HKEY_CURRENT_USER, path, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None) == ERROR_SUCCESS {
+                let _ = RegDeleteValueW(key, RUN_VALUE);
+                let _ = RegCloseKey(key);
             }
-            None => {
-                let status = RegDeleteValueW(run, RUN_VALUE);
-                if let Ok(approved) = approved {
-                    let _ = RegDeleteValueW(approved, RUN_VALUE);
-                }
-                if status == ERROR_FILE_NOT_FOUND { ERROR_SUCCESS } else { status }
-            }
-        };
-        let _ = RegCloseKey(run);
-        if let Ok(approved) = approved {
-            let _ = RegCloseKey(approved);
         }
-        if status == ERROR_SUCCESS { Ok(()) } else { Err(format!("Windows didn't allow the change (error {}).", status.0)) }
     }
 }
 
@@ -275,7 +246,7 @@ pub fn open_location(path: &str) -> Result<(), String> {
     // Explorer wants the quotes around the path only (/select,"C:\Program Files\…"); quoting
     // the whole argument, as Command would for a path with spaces, isn't what it expects.
     use std::os::windows::process::CommandExt;
-    let select = if crate::breaks::broken("location.no-select") { "" } else { "/select," };
+    let select = "/select,";
     std::process::Command::new(windows.join("explorer.exe"))
         .raw_arg(format!("{select}\"{path}\""))
         .spawn()
@@ -297,14 +268,28 @@ impl Presence {
         self.locked || self.disconnected || self.display_off
     }
 
-    /// A WM_WTSSESSION_CHANGE code.
+    /// A WM_WTSSESSION_CHANGE code. Someone unlocking, signing in or connecting can see the
+    /// screen, so the display is on, whether or not its own message got through (on a PC that
+    /// sleeps in Modern Standby it can be missed, and a face unlock leaves no input behind).
     pub fn session_event(&mut self, code: u32) {
         match code {
             WTS_SESSION_LOCK => self.locked = true,
-            WTS_SESSION_UNLOCK | WTS_SESSION_LOGON => self.locked = false,
+            WTS_SESSION_UNLOCK | WTS_SESSION_LOGON => (self.locked, self.display_off) = (false, false),
             WTS_CONSOLE_DISCONNECT | WTS_REMOTE_DISCONNECT => self.disconnected = true,
-            WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT => self.disconnected = false,
+            WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT => (self.disconnected, self.display_off) = (false, false),
             _ => {}
+        }
+    }
+
+    /// The session event, in words for the log.
+    pub fn session_event_name(code: u32) -> &'static str {
+        match code {
+            WTS_SESSION_LOCK => "session locked",
+            WTS_SESSION_UNLOCK => "session unlocked",
+            WTS_SESSION_LOGON => "signed in",
+            WTS_CONSOLE_DISCONNECT | WTS_REMOTE_DISCONNECT => "session disconnected",
+            WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT => "session connected",
+            _ => "session change",
         }
     }
 
@@ -862,29 +847,37 @@ pub fn monitor_above(monitor: RECT) -> bool {
     })
 }
 
-/// True when a fullscreen game, video or presentation is in front on this monitor.
-/// Windows' own signal catches exclusive fullscreen; the rectangle check catches
-/// borderless-window games and fullscreen video, which the signal can miss.
-pub fn fullscreen_active(monitor: RECT) -> bool {
+/// What fullscreen game, video or presentation is in front on this monitor, if any, in words
+/// for the log. Windows' own signal catches exclusive fullscreen; the rectangle check catches
+/// borderless-window games and fullscreen video, which the signal can miss. A window nobody can
+/// see doesn't count: hidden, or cloaked by Windows (as the lock screen's window can be, left in
+/// front after unlocking).
+pub fn fullscreen_in_front(monitor: RECT) -> Option<String> {
     unsafe {
         if let Ok(state) = SHQueryUserNotificationState() {
-            if state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
-                return true;
+            if state == QUNS_RUNNING_D3D_FULL_SCREEN {
+                return Some("a fullscreen game".into());
+            }
+            if state == QUNS_PRESENTATION_MODE {
+                return Some("a presentation".into());
+            }
+            if state == QUNS_BUSY {
+                return Some("a fullscreen program (Windows says)".into());
             }
         }
         let window = GetForegroundWindow();
-        if window.is_invalid() {
-            return false;
+        if window.is_invalid() || !IsWindowVisible(window).as_bool() || cloaked(window) {
+            return None;
         }
         let mut class = [0u16; 64];
         let len = GetClassNameW(window, &mut class).max(0) as usize;
         let class = String::from_utf16_lossy(&class[..len]);
         if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-            return false;
+            return None;
         }
         let mut rect = RECT::default();
         if GetWindowRect(window, &mut rect).is_err() {
-            return false;
+            return None;
         }
         let covers = rect.left <= monitor.left
             && rect.top <= monitor.top
@@ -892,8 +885,15 @@ pub fn fullscreen_active(monitor: RECT) -> bool {
             && rect.bottom >= monitor.bottom;
         // A maximized window can also cover the monitor when the taskbar auto-hides;
         // that's not fullscreen.
-        covers && !IsZoomed(window).as_bool()
+        (covers && !IsZoomed(window).as_bool()).then(|| format!("a fullscreen window ({class})"))
     }
+}
+
+/// Windows has hidden this window without hiding it (cloaked): still "visible", never shown.
+fn cloaked(window: HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    let mut value = 0u32;
+    unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut value as *mut u32 as *mut c_void, size_of::<u32>() as u32) }.is_ok() && value != 0
 }
 
 #[cfg(test)]
@@ -1019,5 +1019,18 @@ mod tests {
         presence.session_event(WTS_REMOTE_DISCONNECT);
         presence.session_event(WTS_CONSOLE_CONNECT);
         assert!(!presence.away(), "back at the computer");
+    }
+
+    #[test]
+    fn unlocking_means_the_display_is_on_even_if_its_own_message_was_missed() {
+        // Modern Standby: display off, locked; the display-on message lost on the way back.
+        let mut presence = Presence::default();
+        presence.display_state(0);
+        presence.session_event(WTS_SESSION_LOCK);
+        presence.session_event(WTS_SESSION_UNLOCK);
+        assert!(!presence.away(), "someone unlocked, so they can see the screen");
+        presence.display_state(0);
+        presence.session_event(WTS_REMOTE_CONNECT);
+        assert!(!presence.away(), "connecting from another PC: that screen is on");
     }
 }

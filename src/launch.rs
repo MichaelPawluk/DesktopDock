@@ -199,21 +199,17 @@ impl Job {
             match self {
                 // Show desktop is an action: asked to "open" its shell item, Windows says no app is
                 // associated with it. Windows' own Show desktop shortcut runs it through Explorer.
-                Job::Item { target, .. } if target.eq_ignore_ascii_case(places::SHOW_DESKTOP_TARGET) && !crate::breaks::broken("launch.show-desktop") => {
+                Job::Item { target, .. } if target.eq_ignore_ascii_case(places::SHOW_DESKTOP_TARGET) => {
                     shell_execute_with("explorer.exe", target, "", None, SW_SHOWNORMAL, SEE_MASK_NOASYNC)
                 }
                 Job::Item { target, args, dir, run, admin } => {
-                    use crate::breaks::broken;
                     let show = match run {
-                        _ if broken("launch.ignore-run") => SW_SHOWNORMAL,
                         RunState::Normal => SW_SHOWNORMAL,
                         RunState::Minimized => SW_SHOWMINNOACTIVE,
                         RunState::Maximized => SW_SHOWMAXIMIZED,
                     };
                     // "runas" asks Windows to run it as administrator (with its usual permission prompt).
-                    let verb = (*admin && !broken("launch.ignore-admin")).then_some(w!("runas"));
-                    let args = if broken("launch.ignore-args") { "" } else { args.as_str() };
-                    let dir = if broken("launch.ignore-start-in") { "" } else { dir.as_str() };
+                    let verb = admin.then_some(w!("runas"));
                     shell_execute_with(target, args, dir, verb, show, SEE_MASK_NOASYNC)
                 }
                 Job::Open(path) => shell_execute_with(path, "", "", None, SW_SHOWNORMAL, SEE_MASK_NOASYNC),
@@ -229,7 +225,6 @@ impl Job {
                         || quiet("notepad.exe", &quoted, None);
                     if opened { Ok(()) } else { Err(Error::from_hresult(E_FAIL)) }
                 }
-                Job::EmptyBin if crate::breaks::broken("bin.empty-does-nothing") => Ok(()),
                 Job::EmptyBin => SHEmptyRecycleBinW(None, PCWSTR::null(), 0),
             }
         }

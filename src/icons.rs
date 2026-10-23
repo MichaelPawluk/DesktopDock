@@ -13,7 +13,7 @@ use crate::config::{ItemConfig, Kind, RECYCLE_BIN};
 use crate::home::Home;
 use crate::log_warn;
 use crate::places;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -155,7 +155,15 @@ pub fn sources_for(item: &ItemConfig, bin_full: bool) -> Vec<IconSource> {
             sources.push(IconSource::RecycleBin { full: bin_full });
             sources.push(IconSource::Shell(RECYCLE_BIN.into()));
         }
-        _ if !item.target.trim().is_empty() => sources.push(IconSource::Shell(item.target.trim().into())),
+        _ if !item.target.trim().is_empty() => {
+            let target = item.target.trim();
+            // A program's icon straight from its file: Windows' own icon cache keeps the old one
+            // for a program updated in place, even after it's told. (Windows' icon if it has none.)
+            if Path::new(target).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
+                sources.push(IconSource::Resource(target.into(), 0));
+            }
+            sources.push(IconSource::Shell(target.into()));
+        }
         _ => {}
     }
     sources
@@ -177,6 +185,37 @@ pub fn cache_key(sources: &[IconSource], size: u32) -> String {
         }
     }
     format!("{:016x}", fnv1a(text.as_bytes()))
+}
+
+/// A fingerprint of the files these sources come from (each one's size and modified time). It
+/// changes when a program is updated or an image edited, so a dock that's been running all along
+/// knows that icon is out of date.
+pub fn source_stamp(sources: &[IconSource]) -> u64 {
+    let mut text = String::new();
+    for source in sources {
+        let file = match source {
+            IconSource::Image(f) | IconSource::Resource(f, _) | IconSource::Shell(f) => Some(f),
+            IconSource::RecycleBin { .. } => None,
+        };
+        if let Some(meta) = file.and_then(|f| std::fs::metadata(f).ok()).filter(|m| m.is_file()) {
+            let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            text.push_str(&format!("{}:{}", meta.len(), modified.map_or(0, |d| d.as_nanos())));
+        }
+        text.push('|');
+    }
+    fnv1a(text.as_bytes())
+}
+
+/// Takes fresh fingerprints (see `source_stamp`): records the ones seen for the first time, and
+/// returns the sources whose files changed since they were last seen (their icons are old).
+pub fn changed_since(recorded: &mut HashMap<Vec<IconSource>, u64>, fresh: Vec<(Vec<IconSource>, u64)>) -> Vec<Vec<IconSource>> {
+    let mut changed = Vec::new();
+    for (sources, stamp) in fresh {
+        if recorded.insert(sources.clone(), stamp).is_some_and(|before| before != stamp) {
+            changed.push(sources);
+        }
+    }
+    changed
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -642,7 +681,7 @@ fn worker(tasks: Receiver<Task>, done: Arc<Mutex<Vec<Done>>>, cache: PathBuf, hw
 }
 
 /// Whether making this icon means asking a network place (see `places::on_network`).
-fn on_network(sources: &[IconSource]) -> bool {
+pub fn on_network(sources: &[IconSource]) -> bool {
     sources.iter().any(|source| match source {
         IconSource::Image(path) | IconSource::Resource(path, _) | IconSource::Shell(path) => places::on_network(path),
         IconSource::RecycleBin { .. } => false,
@@ -804,7 +843,18 @@ mod tests {
     #[test]
     fn custom_image_first_then_the_targets_own_icon() {
         let sources = sources_for(&item(r"C:\Pictures\tb.png", r"C:\tb.exe"), false);
-        assert_eq!(sources, vec![IconSource::Image(r"C:\Pictures\tb.png".into()), IconSource::Shell(r"C:\tb.exe".into())]);
+        assert_eq!(
+            sources,
+            vec![IconSource::Image(r"C:\Pictures\tb.png".into()), IconSource::Resource(r"C:\tb.exe".into(), 0), IconSource::Shell(r"C:\tb.exe".into())]
+        );
+    }
+
+    #[test]
+    fn a_programs_icon_comes_from_its_file_and_anything_elses_from_windows() {
+        let program = sources_for(&item("", r"C:\Tools\App.EXE"), false);
+        assert_eq!(program, vec![IconSource::Resource(r"C:\Tools\App.EXE".into(), 0), IconSource::Shell(r"C:\Tools\App.EXE".into())]);
+        let document = sources_for(&item("", r"C:\Users\alex\Documents\notes.txt"), false);
+        assert_eq!(document, vec![IconSource::Shell(r"C:\Users\alex\Documents\notes.txt".into())]);
     }
 
     #[test]
@@ -855,6 +905,26 @@ mod tests {
         std::fs::write(&file, b"one plus more").unwrap();
         assert_ne!(cache_key(&sources, 80), before);
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn an_icon_whose_program_was_updated_is_found_out_of_date() {
+        let file = std::env::temp_dir().join(format!("dock-icon-stamp-{}.exe", std::process::id()));
+        std::fs::write(&file, b"version 1").unwrap();
+        let program = vec![IconSource::Shell(file.to_string_lossy().into_owned())];
+        let bin = vec![IconSource::RecycleBin { full: false }];
+        let mut recorded = HashMap::new();
+        let first = icons_seen(&mut recorded, &[&program, &bin]);
+        assert!(first.is_empty(), "the first look only records");
+        assert!(icons_seen(&mut recorded, &[&program, &bin]).is_empty(), "nothing changed");
+        std::fs::write(&file, b"version 2, a bigger program").unwrap();
+        assert_eq!(icons_seen(&mut recorded, &[&program, &bin]), vec![program.clone()], "updated: its icon is old");
+        assert!(icons_seen(&mut recorded, &[&program, &bin]).is_empty(), "and found once");
+        let _ = std::fs::remove_file(file);
+    }
+
+    fn icons_seen(recorded: &mut HashMap<Vec<IconSource>, u64>, all: &[&Vec<IconSource>]) -> Vec<Vec<IconSource>> {
+        changed_since(recorded, all.iter().map(|sources| ((*sources).clone(), source_stamp(sources))).collect())
     }
 
     #[test]

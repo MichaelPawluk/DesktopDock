@@ -10,6 +10,9 @@
 //! window for a sign of life (WM_NULL, which is answered even while a menu, a message box or a
 //! drag is open). No answer three times in a row (within a minute), and the dock is ended and
 //! restarted. Not while a debugger holds it, and not straight after the PC wakes up.
+//!
+//! A dock that couldn't start (its window or drawing not made, say just after waking) says why in
+//! the log and is tried again after a pause, under the same crash rules.
 
 use crate::{log_error, log_info, log_warn, system};
 use std::collections::VecDeque;
@@ -40,6 +43,11 @@ const EARLY_HANG: Duration = Duration::from_secs(3 * 60);
 /// The exit code given to a dock ended for not responding: in the crash range, so the crash
 /// rules apply ("DD" for Desktop Dock).
 pub const HUNG_CODE: u32 = 0xC0DD_0001;
+/// The exit code of a dock that couldn't start (its window or its drawing couldn't be made, or
+/// dock.toml couldn't be written): in the crash range too, so it's tried again, after a pause.
+pub const STARTUP_FAILED_CODE: u32 = 0xC0DD_0002;
+/// The pause before trying a dock that couldn't start again.
+const STARTUP_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -138,6 +146,9 @@ pub fn run(args: &[String]) -> ! {
             Decision::Restart { safe_mode: safe } => {
                 if code == HUNG_CODE {
                     log_warn!("dock stopped responding after {} s; restarting", started.elapsed().as_secs());
+                } else if code == STARTUP_FAILED_CODE {
+                    log_warn!("dock couldn't start; trying again in {} s", STARTUP_RETRY_AFTER.as_secs());
+                    std::thread::sleep(STARTUP_RETRY_AFTER);
                 } else {
                     log_warn!("dock crashed (code {code:#010x}) after {} s; restarting", started.elapsed().as_secs());
                 }
@@ -172,8 +183,12 @@ fn watch(child: &mut Child, started: Instant) -> u32 {
         // The tick count runs on while the PC sleeps; the wait doesn't. A jump means it slept,
         // and the dock gets time to catch up before it's judged.
         let tick = unsafe { GetTickCount64() };
-        let slept = tick.saturating_sub(last_tick) > (PROBE_EVERY + Duration::from_secs(10)).as_millis() as u64;
+        let gap = tick.saturating_sub(last_tick);
+        let slept = gap > (PROBE_EVERY + Duration::from_secs(10)).as_millis() as u64;
         last_tick = tick;
+        if slept {
+            log_info!("the PC was asleep or paused (about {} s); the dock gets time to catch up", gap / 1000);
+        }
         if slept || debugger_attached(process) {
             liveness.reset();
             continue;
@@ -315,6 +330,18 @@ mod tests {
         let mut policy = Policy::default();
         policy.on_exit(HUNG_CODE, early, t);
         assert_eq!(policy.on_exit(HUNG_CODE, LONG, t + Duration::from_secs(3700)), Decision::Restart { safe_mode: false }, "a hang after an hour isn't quick");
+    }
+
+    #[test]
+    fn a_dock_that_couldnt_start_is_tried_again_but_not_for_ever() {
+        assert!(is_crash(STARTUP_FAILED_CODE), "not taken for Exit or End task");
+        let mut policy = Policy::default();
+        let t = Instant::now();
+        let at_once = Duration::from_millis(300);
+        assert_eq!(policy.on_exit(STARTUP_FAILED_CODE, at_once, t), Decision::Restart { safe_mode: false });
+        assert_eq!(policy.on_exit(STARTUP_FAILED_CODE, at_once, t + Duration::from_secs(6)), Decision::Restart { safe_mode: true });
+        assert_eq!(policy.on_exit(STARTUP_FAILED_CODE, at_once, t + Duration::from_secs(12)), Decision::Restart { safe_mode: true });
+        assert_eq!(policy.on_exit(STARTUP_FAILED_CODE, at_once, t + Duration::from_secs(18)), Decision::GiveUp, "then it says so");
     }
 
     #[test]

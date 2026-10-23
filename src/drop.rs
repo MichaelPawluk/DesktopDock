@@ -351,7 +351,7 @@ fn from_shortcut(path: &Path, name: String, home: &Home) -> ItemConfig {
         // Installer-managed shortcuts, and ones pointing at shell places, only work as
         // themselves: keep a private copy in the dock folder, so deleting the original is fine.
         _ => {
-            let kept = if crate::breaks::broken("drop.no-kept-copy") { None } else { keep_copy(path, home) };
+            let kept = keep_copy(path, home);
             let target = kept.unwrap_or_else(|| path.display().to_string());
             ItemConfig::new(name, target)
         }
@@ -390,7 +390,6 @@ fn keep_copy(path: &Path, home: &Home) -> Option<String> {
 fn from_internet_shortcut(path: &Path, name: String) -> ItemConfig {
     let text = std::fs::read(path).map(|bytes| crate::system::text_from_bytes(&bytes)).unwrap_or_default();
     let (url, icon) = parse_internet_shortcut(&text);
-    let url = if crate::breaks::broken("drop.url-as-file") { String::new() } else { url };
     let mut item = ItemConfig::new(name, if url.is_empty() { path.display().to_string() } else { url });
     item.icon = icon;
     item

@@ -52,7 +52,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
     ASFW_ANY, AllowSetForegroundWindow, GetMessageW, GetWindowRect, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
     IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, PBT_POWERSETTINGCHANGE, PM_REMOVE, PeekMessageW, PostMessageW,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, PM_REMOVE, PeekMessageW, PostMessageW, ENDSESSION_LOGOFF, WM_ENDSESSION,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     SWP_NOSIZE, SWP_SHOWWINDOW, SetCoalescableTimer, SetCursorPos, SetLayeredWindowAttributes, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenuEx,
@@ -194,6 +194,10 @@ const WM_APP_PEEK: u32 = WM_APP + 10;
 const WM_APP_PREVIEW: u32 = WM_APP + 11;
 /// Posted when the second look at missing items finishes (wparam 1: one of them is back).
 const WM_APP_MISSING_CHECKED: u32 = WM_APP + 12;
+/// Posted when the look at the icons' files finishes (see `check_icon_stamps`).
+const WM_APP_STAMPS_CHECKED: u32 = WM_APP + 13;
+/// How often, at most, the dock looks for programs updated since their icons were made.
+const STAMP_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How long the dock stays out after the settings window's last change.
 const PEEK_FOR: Duration = Duration::from_secs(3);
 /// How long the dock stays out after the keyboard shortcut, unless the pointer goes to it.
@@ -423,6 +427,8 @@ pub struct Dock {
     reduced_motion: bool,
     /// Signalled when a file in the dock folder changes (None: check dock.toml every second).
     folder_watch: Option<HANDLE>,
+    /// The fullscreen program last found in front, as the log said it (see `fullscreen_in_front`).
+    fullscreen_seen: Option<String>,
     /// The last keyboard or mouse input when the dock decided nobody was there.
     away_input_tick: u32,
     /// The keyboard shortcut registered now (see `apply_hotkey`).
@@ -443,6 +449,14 @@ pub struct Dock {
     /// under way (see `recheck_missing`).
     missing_checked: Option<Instant>,
     missing_checking: bool,
+    /// Each icon's files as they were when it was made (see `check_icon_stamps`); the icons whose
+    /// program has since been updated, to make again; when the files were last looked at, and the
+    /// look under way. `stamps_due`: look as soon as the icons have loaded.
+    icon_stamps: HashMap<Vec<IconSource>, u64>,
+    stale_icons: HashSet<Vec<IconSource>>,
+    stamps_checked: Option<Instant>,
+    stamps_coming: Option<std::sync::mpsc::Receiver<Vec<(Vec<IconSource>, u64)>>>,
+    stamps_due: bool,
     placeholder_retries: u32,
     /// Something missing is back: refresh the dock when it next hides.
     refresh_on_hide: bool,
@@ -689,6 +703,7 @@ impl Dock {
             presence: system::Presence::default(),
             reduced_motion: false,
             folder_watch: None,
+            fullscreen_seen: None,
             away_input_tick: 0,
             hotkey: None,
             loaded_text: None,
@@ -699,6 +714,11 @@ impl Dock {
             missing_since: None,
             missing_checked: None,
             missing_checking: false,
+            icon_stamps: HashMap::new(),
+            stale_icons: HashSet::new(),
+            stamps_checked: None,
+            stamps_coming: None,
+            stamps_due: true,
             placeholder_retries: PLACEHOLDER_RETRIES,
             refresh_on_hide: false,
             taskbar_created: 0,
@@ -839,7 +859,7 @@ impl Dock {
             // CrystalXP's fill: white, brightening from 8% at the screen edge to 49% at the bottom
             // (times the background opacity setting).
             let solid = self.settings.background_opacity as f32 / 100.0;
-            let look = if crate::breaks::broken("look.dark-ignored") { DockLook::Light } else { self.settings.look };
+            let look = self.settings.look;
             let stops = match look {
                 DockLook::Light => [
                     D2D1_GRADIENT_STOP { position: 0.0, color: rgba(1.0, 1.0, 1.0, 0.08 * solid) },
@@ -915,7 +935,8 @@ impl Dock {
                 for (part, size) in wanted {
                     keep.push((child.sources.clone(), size));
                     let slot = if part == Part::Child(k) { &mut child.icon } else { &mut child.preview };
-                    *slot = previous.remove(&(child.sources.clone(), size));
+                    // (Not one whose program was updated since: that's made again.)
+                    *slot = if self.stale_icons.contains(&child.sources) { None } else { previous.remove(&(child.sources.clone(), size)) };
                     if slot.is_some() {
                         continue;
                     }
@@ -946,7 +967,7 @@ impl Dock {
                 keep.push((other.clone(), base_px));
                 keep.push((other, zoom_px));
             }
-            item.base = previous.remove(&(item.sources.clone(), base_px));
+            item.base = if self.stale_icons.contains(&item.sources) { None } else { previous.remove(&(item.sources.clone(), base_px)) };
             if item.base.is_some() {
                 continue;
             }
@@ -975,7 +996,9 @@ impl Dock {
             }
         }
         let wanted: HashSet<&Vec<IconSource>> = keep.iter().map(|(sources, _)| sources).collect();
-        self.tints.retain(|sources, _| wanted.contains(sources));
+        self.tints.retain(|sources, _| wanted.contains(sources) && !self.stale_icons.contains(sources));
+        self.stale_icons.clear();
+        self.stamps_due = true; // the icons' files, as they are now, once these have loaded
         if let Some(worker) = &self.icons {
             worker.prune(keep);
         }
@@ -1042,6 +1065,9 @@ impl Dock {
         if self.pending_base == 0 {
             if let Some(started) = self.started.take() {
                 log_info!("all icons loaded {} ms after start", started.elapsed().as_millis());
+            }
+            if std::mem::take(&mut self.stamps_due) {
+                self.check_icon_stamps(true);
             }
         }
         if changed {
@@ -1183,6 +1209,60 @@ impl Dock {
         });
     }
 
+    /// A program updated while the dock runs gets a new icon on the dock too, not only on hover:
+    /// a look in the background at each icon's files (their size and date; not on a network
+    /// place), once the icons have loaded and when the dock comes out (at most every 30 s). An
+    /// icon whose files changed is made again when the dock next hides.
+    fn check_icon_stamps(&mut self, force: bool) {
+        let Some(hwnd) = self.hwnd else { return };
+        if self.safe_mode || self.stamps_coming.is_some() || (!force && self.stamps_checked.is_some_and(|at| at.elapsed() < STAMP_CHECK_EVERY)) {
+            return;
+        }
+        let all: Vec<Vec<IconSource>> = self
+            .items
+            .iter()
+            .flat_map(|item| std::iter::once(&item.sources).chain(item.children.iter().map(|child| &child.sources)))
+            .filter(|sources| !sources.is_empty() && !icons::on_network(sources))
+            .cloned()
+            .collect();
+        self.stamps_checked = Some(Instant::now());
+        let (send, coming) = std::sync::mpsc::channel();
+        self.stamps_coming = Some(coming);
+        let hwnd_value = hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let stamps: Vec<(Vec<IconSource>, u64)> = all.into_iter().map(|sources| { let stamp = icons::source_stamp(&sources); (sources, stamp) }).collect();
+            let _ = send.send(stamps);
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_value as *mut std::ffi::c_void)), WM_APP_STAMPS_CHECKED, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    /// The look at the icons' files finished: any whose program was updated is made again.
+    fn receive_icon_stamps(&mut self) {
+        let Some(stamps) = self.stamps_coming.take().and_then(|coming| coming.try_recv().ok()) else { return };
+        let now: HashSet<&Vec<IconSource>> = stamps.iter().map(|(sources, _)| sources).collect();
+        self.icon_stamps.retain(|sources, _| now.contains(sources));
+        let changed = icons::changed_since(&mut self.icon_stamps, stamps);
+        if changed.is_empty() {
+            return;
+        }
+        for sources in &changed {
+            let name = self
+                .items
+                .iter()
+                .flat_map(|item| std::iter::once((&item.sources, &item.cfg)).chain(item.children.iter().map(|child| (&child.sources, &child.cfg))))
+                .find(|(s, _)| *s == sources)
+                .map(|(_, cfg)| edit::label_of(cfg));
+            log_info!("{} was updated; its icon is made again when the dock hides", name.as_deref().unwrap_or("a program"));
+        }
+        self.stale_icons.extend(changed);
+        self.refresh_on_hide = true;
+        if !self.window_visible {
+            self.refresh_hidden();
+        }
+    }
+
     /// The second look at missing items finished.
     fn receive_missing_check(&mut self, back: bool) {
         self.missing_checking = false;
@@ -1201,7 +1281,7 @@ impl Dock {
         if !std::mem::take(&mut self.refresh_on_hide) {
             return;
         }
-        log_info!("refreshing out of sight (placeholder icons or a missing item)");
+        log_info!("refreshing out of sight (placeholder icons, a missing item or an updated program)");
         if let Err(e) = self.reload_keeping_undo() {
             log_warn!("couldn't refresh the dock: {e}");
         }
@@ -1401,7 +1481,7 @@ impl Dock {
         log_info!("Recycle Bin is {}", if full { "full" } else { "empty" });
         let base_px = self.layout.geo.icon as u32;
         for (index, item) in self.items.iter_mut().enumerate() {
-            if item.cfg.kind != Kind::RecycleBin || crate::breaks::broken("bin.icon-stale") {
+            if item.cfg.kind != Kind::RecycleBin {
                 continue;
             }
             item.sources = icons::sources_for(&resolved(&self.home, &item.cfg), full);
@@ -1535,10 +1615,8 @@ impl Dock {
     /// back, and afterwards it's in Recently removed (right-click → Put back).
     fn remove_item(&mut self, index: usize, expect: &str) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
-        let neighbour = crate::breaks::broken("menu.remove-neighbour") && index + 1 < self.items.len();
-        let index = if neighbour { index + 1 } else { index };
         let label = edit::label_of(&self.items.get(index).ok_or("That item isn't there any more.")?.cfg);
-        if label != expect && !neighbour {
+        if label != expect {
             return Err(format!("The dock changed while the menu was open ({expect} has moved), so nothing was done. Try again."));
         }
         let (table, change) = store.change(|doc| edit::remove(doc, Spot::dock(index), &label))?;
@@ -1552,11 +1630,7 @@ impl Dock {
         let (store, removed) = self.editable()?;
         let entry = removed.take(id).ok_or("It's no longer in Recently removed.")?;
         let result = store.change(|doc| {
-            let spot = if crate::breaks::broken("undo.put-back-at-end") {
-                edit::put_back_spot(doc, usize::MAX, None)
-            } else {
-                edit::put_back_spot(doc, entry.was_at, entry.was_in.as_deref())
-            };
+            let spot = edit::put_back_spot(doc, entry.was_at, entry.was_in.as_deref());
             edit::insert(doc, spot, entry.table.clone())
         });
         let ((), change) = result.inspect_err(|_| {
@@ -1572,9 +1646,7 @@ impl Dock {
     fn undo(&mut self) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
         let step = self.undo.take().ok_or("There's nothing to undo.")?;
-        if !crate::breaks::broken("undo.no-op") {
-            store.revert(&step.change)?;
-        }
+        store.revert(&step.change)?;
         if let Some(id) = &step.removed_id {
             removed.take(id);
         }
@@ -2100,9 +2172,7 @@ impl Dock {
         }
         let quoted: Vec<String> = dropped.paths.iter().map(|path| format!("\"{path}\"")).collect();
         let mut with_files = item.cfg.clone();
-        if !crate::breaks::broken("drop.open-with-no-file") {
-            with_files.args = format!("{} {}", with_files.args, quoted.join(" ")).trim().to_string();
-        }
+        with_files.args = format!("{} {}", with_files.args, quoted.join(" ")).trim().to_string();
         log_info!("opening {} file(s) with {expect}", dropped.paths.len());
         self.launch_effect(index);
         Some(Action::Launch(with_files, index, self.generation))
@@ -2192,8 +2262,6 @@ impl Dock {
     /// settings stay; Undo is on the strip.
     fn replace_program(&mut self, index: usize, expect: &str, new: &ItemConfig) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
-        let kept = (crate::breaks::broken("drop.replace-keeps-target")).then(|| self.items.get(index).map(|item| item.cfg.clone())).flatten();
-        let new = kept.as_ref().unwrap_or(new);
         let ((), change) = store.change(|doc| edit::replace_program(doc, Spot::dock(index), expect, new))?;
         log_info!("replaced {expect}'s program with {} ({})", edit::label_of(new), new.target);
         self.show_change(UndoStep { what: format!("replace {expect}"), change, removed_id: None, put_back: None }, format!("Replaced {expect}"))
@@ -2550,6 +2618,7 @@ impl Dock {
         self.reveal_target = 1.0;
         self.check_recycle_bin();
         self.recheck_missing(false);
+        self.check_icon_stamps(false);
     }
 
     fn hide(&mut self) {
@@ -2582,7 +2651,7 @@ impl Dock {
             if self.hotkey.take().is_some() {
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
             }
-            if let Some(key) = wanted.filter(|_| !crate::breaks::broken("hotkey.not-registered")) {
+            if let Some(key) = wanted {
                 let modifiers = HOT_KEY_MODIFIERS(key.modifiers | hotkey::MOD_NOREPEAT);
                 match RegisterHotKey(Some(hwnd), HOTKEY_ID, modifiers, key.key) {
                     Ok(()) => {
@@ -2595,12 +2664,27 @@ impl Dock {
         }
     }
 
+    /// A fullscreen game, video or presentation in front on the dock's screen: the dock stays
+    /// out of its way. The log says so when that changes, so a dock that "didn't come out" can
+    /// be told from one that went wrong.
+    fn fullscreen_in_front(&mut self) -> bool {
+        let found = system::fullscreen_in_front(self.screen.monitor);
+        if found != self.fullscreen_seen {
+            match &found {
+                Some(what) => log_info!("staying hidden: {what} is in front"),
+                None => log_info!("nothing fullscreen in front now"),
+            }
+            self.fullscreen_seen = found.clone();
+        }
+        found.is_some()
+    }
+
     /// The keyboard shortcut: out if the dock is hidden (for a few seconds, or until the pointer
     /// has been over it and left; Esc sends it back), back up if it's out. Not over a
     /// fullscreen app or game.
     fn summon(&mut self) {
         self.check_presence(); // the key press itself means someone's there
-        if self.presence.away() || system::fullscreen_active(self.screen.monitor) {
+        if self.presence.away() || self.fullscreen_in_front() {
             return;
         }
         if self.reveal_target >= 0.5 {
@@ -2616,7 +2700,7 @@ impl Dock {
     }
 
     fn peek(&mut self) {
-        if self.presence.away() || system::fullscreen_active(self.screen.monitor) {
+        if self.presence.away() || self.fullscreen_in_front() {
             return;
         }
         let now = Instant::now();
@@ -2879,7 +2963,6 @@ impl Dock {
             WM_LBUTTONUP => {
                 let (index, pressed) = (open.index, open.pressed.take());
                 let Some(k) = pressed.filter(|&k| Some(k) == at) else { return (done, None) };
-                let k = if crate::breaks::broken("group.wrong-child") { (k + 1) % self.items.get(index).map_or(1, |item| item.children.len().max(1)) } else { k };
                 let Some(child) = self.items.get(index).and_then(|item| item.children.get(k)).map(|child| child.cfg.clone()) else {
                     return (done, None);
                 };
@@ -2965,6 +3048,9 @@ impl Dock {
         }
         self.window_visible = false;
         self.tracking_mouse = false;
+        if self.drop_zone_shown {
+            self.set_drop_zone(false); // nothing left up there catching clicks while out of sight
+        }
         for item in &mut self.items {
             item.hover_t = 0.0;
             item.bounce_start = None;
@@ -3036,7 +3122,7 @@ impl Dock {
             }
             let at_edge = at_edge && !held;
             let delay = Duration::from_millis(self.settings.popup_delay_ms);
-            if self.edge.update(at_edge, now, delay) && !system::fullscreen_active(self.screen.monitor) {
+            if self.edge.update(at_edge, now, delay) && !self.fullscreen_in_front() {
                 self.show();
             }
             // Quick checks near the edge, and while any button is held (a drag may be on its way up).
@@ -3048,7 +3134,7 @@ impl Dock {
                 self.set_drop_zone(false);
             }
             let busy = self.menu_open || self.drag.is_some() || self.press.is_some() || self.child_press.is_some() || self.incoming.is_some() || self.group.is_some();
-            if !busy && system::fullscreen_active(self.screen.monitor) {
+            if !busy && self.fullscreen_in_front() {
                 self.hide();
                 return None;
             }
@@ -3150,7 +3236,7 @@ impl Dock {
 
     /// A click on the undo strip (anywhere on it: it's small, and it only does one thing).
     fn strip_hit(&self, lparam: LPARAM) -> bool {
-        let Some(strip) = self.strip.as_ref().filter(|strip| strip.undo_rect.is_some() && !crate::breaks::broken("undo.no-hit-area")) else { return false };
+        let Some(strip) = self.strip.as_ref().filter(|strip| strip.undo_rect.is_some()) else { return false };
         let (x, y) = point_from_lparam(lparam);
         let (x, y) = (x as f32, y as f32 - self.content_offset());
         x >= strip.rect.left && x < strip.rect.right && y >= strip.rect.top && y < strip.rect.bottom
@@ -3267,6 +3353,10 @@ impl Dock {
             }
             WM_APP_MISSING_CHECKED => {
                 self.receive_missing_check(wparam.0 != 0);
+                (done, None)
+            }
+            WM_APP_STAMPS_CHECKED => {
+                self.receive_icon_stamps();
                 (done, None)
             }
             WM_TIMER if wparam.0 == TIMER_WELCOME => {
@@ -3455,13 +3545,16 @@ impl Dock {
             }
             WM_POWERBROADCAST => {
                 match wparam.0 as u32 {
+                    PBT_APMSUSPEND => log_info!("Windows is going to sleep"),
                     PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                        log_info!("{}", if wparam.0 as u32 == PBT_APMRESUMESUSPEND { "woke up for someone at the PC" } else { "Windows woke up" });
                         self.placeholder_retries = PLACEHOLDER_RETRIES;
                         self.check_presence();
                         self.schedule_recheck();
                     }
                     PBT_POWERSETTINGCHANGE => {
                         if let Some(state) = unsafe { system::display_state(lparam) } {
+                            log_info!("display {}", match state { 0 => "off", 2 => "dimmed", _ => "on" });
                             self.presence.display_state(state);
                             self.apply_presence();
                         }
@@ -3471,9 +3564,16 @@ impl Dock {
                 (Some(LRESULT(1)), None)
             }
             WM_WTSSESSION_CHANGE => {
+                log_info!("{}", system::Presence::session_event_name(wparam.0 as u32));
                 self.presence.session_event(wparam.0 as u32);
                 self.apply_presence();
                 (done, None)
+            }
+            // Windows is ending the session: say so, so the log doesn't just stop. (Windows ends
+            // the dock straight after; the watchdog knows not to start it again.)
+            WM_ENDSESSION if wparam.0 != 0 => {
+                log_info!("Windows is {}", if lparam.0 as u32 & ENDSESSION_LOGOFF != 0 { "signing out" } else { "shutting down or restarting" });
+                (None, None)
             }
             WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
                 self.summon();
@@ -3599,7 +3699,7 @@ impl Dock {
     /// The glow's colour for an item: Windows' accent, or the icon's own main colour (a group's
     /// tile: its first item's), the accent standing in for icons with hardly any colour.
     fn glow_colour(&self, item: &Item) -> [f32; 3] {
-        if self.settings.hover_glow == HoverGlow::Accent || crate::breaks::broken("glow.accent-for-icon") {
+        if self.settings.hover_glow == HoverGlow::Accent {
             return self.accent;
         }
         let sources = if item.shows_preview() {
@@ -3748,7 +3848,7 @@ impl Dock {
                         // The icon opacity setting, rising to solid as the icon grows under the
                         // pointer. Dimmed further: the program is missing and couldn't be repaired.
                         let opacity = icon_opacity + (1.0 - icon_opacity) * item.hover_t;
-                        let dim = self.missing.contains(&slot.item) && !crate::breaks::broken("missing.not-dimmed");
+                        let dim = self.missing.contains(&slot.item);
                         let opacity = if dim { 0.4 * opacity } else { opacity };
                         rt.DrawBitmap(bitmap, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
                     }
@@ -3771,7 +3871,7 @@ impl Dock {
                 Some((index, text)) => Some((index, text)),
                 None => self
                     .hovered
-                    .filter(|_| self.settings.show_labels || crate::breaks::broken("labels.always"))
+                    .filter(|_| self.settings.show_labels)
                     .filter(|&index| !self.group.as_ref().is_some_and(|open| open.index == index)) // its pop-up names it
                     .and_then(|index| self.items.get(index).map(|item| (index, &item.label))),
             };
@@ -4123,7 +4223,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         if facts.editable && facts.kind.is_some_and(|kind| kind != Kind::Separator) {
             item(MF_STRING, MENU_PROPERTIES, "Properties...", &mut open);
         }
-        if let (Some((_, label)), true) = (&facts.target, facts.editable && (!facts.locked || crate::breaks::broken("menu.lock-keeps-remove"))) {
+        if let (Some((_, label)), true) = (&facts.target, facts.editable && !facts.locked) {
             item(MF_STRING, MENU_REMOVE, &format!("Remove {label}"), &mut open);
         }
         // Bringing things onto the dock: new ones, or ones taken off (Put back: also while locked,
@@ -4636,7 +4736,10 @@ fn message_loop(mut folder_watch: Option<HANDLE>) {
                 }
                 let started = Instant::now();
                 with_dock(|dock| dock.frame());
-                if DwmFlush().is_err() || started.elapsed() < Duration::from_millis(2) {
+                // (Not while nobody's there: with the display off or the session switched away,
+                // Windows may not draw, and waiting for it would stop the dock answering.)
+                let away = with_dock(|dock| dock.presence.away()).unwrap_or(false);
+                if away || DwmFlush().is_err() || started.elapsed() < Duration::from_millis(2) {
                     std::thread::sleep(Duration::from_millis(4)); // never spin
                 }
             } else if let Some(folder) = folder_watch {

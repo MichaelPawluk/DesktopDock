@@ -36,7 +36,7 @@ A lightweight dock for Windows 11. It stays hidden at the top of your screen and
 
 The program isn't digitally signed (a code-signing certificate costs money every year), so Windows shows a warning the first time you run it. If you see "Unknown Publisher", click **Run**. If you see "Windows protected your PC", click **More info**, then **Run anyway**.
 
-Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or another folder you choose with **Change…**). It adds a Start menu shortcut and an entry in Settings > Apps > Installed apps, and starts with Windows unless you untick that option.
+Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or another folder you choose with **Change…**). It adds a Start menu shortcut and an entry in Settings > Apps > Installed apps, and starts with Windows unless you untick that option. Starting with Windows is a sign-in task of your own in Task Scheduler, so the dock appears within seconds of signing in instead of waiting behind other startup apps; turn it on or off in Dock settings > Behaviour.
 
 ![Setup](docs/images/setup.png)
 

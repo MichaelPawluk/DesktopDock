@@ -1394,7 +1394,7 @@ impl Settings {
         }
         self.set_check(IDC_SHOW_LABELS, self.dock.show_labels);
         self.set_check(IDC_LOCKED, self.dock.locked);
-        self.set_check(IDC_STARTUP, system::starts_with_windows());
+        self.set_check(IDC_STARTUP, crate::startup::starts_with_windows());
         let pick = |id: i32, choice: usize| {
             if let Some(combo) = self.control(id) {
                 unsafe {
@@ -1476,8 +1476,7 @@ impl Settings {
         let show = changed.iter().any(|(slider, _)| PREVIEWED.contains(&slider.key));
         self.change(&what, None, show, |doc| {
             for (slider, value) in &changed {
-                let key = if slider.key == "spacing" && crate::breaks::broken("settings.wrong-key") { "label_size" } else { slider.key };
-                edit::set_dock(doc, key, toml_number(*value))?;
+                edit::set_dock(doc, slider.key, toml_number(*value))?;
             }
             Ok(())
         });
@@ -1838,9 +1837,9 @@ impl Settings {
                 self.change("Lock icons", None, false, |doc| edit::set_dock(doc, "locked", on));
             }
             (IDC_STARTUP, BN_CLICKED) => {
-                // Not in dock.toml: Windows' list of programs to start (so Revert doesn't undo it).
+                // Not in dock.toml: the sign-in task in Task Scheduler (so Revert doesn't undo it).
                 let on = self.checked(IDC_STARTUP);
-                match system::set_starts_with_windows(on) {
+                match crate::startup::set_starts_with_windows(on) {
                     Ok(()) => self.status(if on { "Start with Windows: on." } else { "Start with Windows: off." }),
                     Err(e) => self.status(&format!("Start with Windows wasn't changed. {e}")),
                 }

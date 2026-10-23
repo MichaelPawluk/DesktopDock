@@ -1,7 +1,6 @@
 // Release builds are a normal Windows app with no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod breaks;
 mod chrome;
 mod config;
 mod dock;
@@ -26,6 +25,7 @@ mod removed;
 mod render;
 mod settings;
 mod setup;
+mod startup;
 mod store;
 mod system;
 mod target;
@@ -141,6 +141,7 @@ fn main() {
         }
     }
 
+    RUNNING_AS_CHILD.store(child, std::sync::atomic::Ordering::Relaxed);
     if quit {
         std::process::exit(if system::quit_running_dock() { 0 } else { 1 });
     }
@@ -170,7 +171,9 @@ fn main() {
         if let Some(dir) = exe.parent() {
             setup::remove_old_copies(dir); // versions an update renamed aside
         }
-        log_info!("watchdog starting; dock folder {}", home.dir.display());
+        let how = if all_args.iter().any(|arg| arg == system::STARTUP_FLAG) { "Windows started it at sign-in" } else { "started by hand or by setup" };
+        log_info!("watchdog starting ({how}); dock folder {}", home.dir.display());
+        startup::move_from_run_entry(); // an installed dock from before 1.0.1
         watchdog::run(&all_args);
     }
     log_info!("starting{}; dock folder {}", if safe_mode { " in safe mode" } else { "" }, home.dir.display());
@@ -291,7 +294,17 @@ fn stress_saves(store: &store::Store) -> ! {
     }
 }
 
+/// Under the watchdog, a dock that can't start says why in the log and leaves the next try to the
+/// watchdog (its crash rules, after a pause: a moment after waking, a window or the drawing may
+/// not be ready yet). Run on its own, it says why in a box.
 fn fatal(message: &str) -> ! {
+    if RUNNING_AS_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
+        log_error!("couldn't start: {message}");
+        std::process::exit(watchdog::STARTUP_FAILED_CODE as i32);
+    }
     system::message_box(message, "Desktop Dock", MB_ICONERROR | MB_OK);
     std::process::exit(1)
 }
+
+/// This process is the dock the watchdog started (`--child`).
+static RUNNING_AS_CHILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

@@ -77,9 +77,6 @@ pub fn all() -> Vec<Option<ItemConfig>> {
 fn item(place: &Place) -> Option<Option<ItemConfig>> {
     let name = local_name(place).unwrap_or_else(|| place.english.to_string());
     let mut item = match &place.at {
-        Where::Shell(_) if place.id == "network" && crate::breaks::broken("places.network-typo") => {
-            ItemConfig::new(name, "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3D}")
-        }
         Where::Shell(target) => ItemConfig::new(name, *target),
         Where::Folder(id, shell_name) => {
             known_folder(id)?;

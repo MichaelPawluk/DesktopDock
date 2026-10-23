@@ -39,8 +39,6 @@ impl Home {
         match target::classify(&expanded) {
             Class::Relative => self.dir.join(&expanded).to_string_lossy().into_owned(),
             Class::Bare if self.dir.join(&expanded).exists() => self.dir.join(&expanded).to_string_lossy().into_owned(),
-            // A deliberate fault for mutation testing (breaks.rs): links and bare names as files.
-            Class::Uri | Class::Bare if crate::breaks::broken("target.old-resolve") => self.dir.join(&expanded).to_string_lossy().into_owned(),
             _ => expanded,
         }
     }

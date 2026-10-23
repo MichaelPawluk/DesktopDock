@@ -267,7 +267,7 @@ fn literal(s: &str) -> toml_edit::Item {
 
 /// Used when a launch finds its target missing: the moved program, if it can be found.
 pub fn moved_target(item: &ItemConfig, target: &str) -> Option<String> {
-    if item.kind != Kind::App || target::classify(target) != Class::Absolute || Path::new(target).exists() || crate::breaks::broken("heal.no-moved") {
+    if item.kind != Kind::App || target::classify(target) != Class::Absolute || Path::new(target).exists() {
         return None;
     }
     let target = normal(target);

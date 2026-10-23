@@ -403,7 +403,7 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
     remember_kept_dock(None);
     if let Some(on) = options.startup.filter(|_| test_root().is_none()) {
         progress(Step::Startup);
-        match system::set_starts_with_windows(on) {
+        match crate::startup::set_starts_with_windows(on) {
             Ok(()) => log(dir, &format!("start with Windows: {}", if on { "on" } else { "off" })),
             Err(e) => log(dir, &format!("start with Windows unchanged: {e}")),
         }
@@ -483,7 +483,7 @@ pub fn uninstall(remove_dock: bool) -> Result<Option<PathBuf>, String> {
             return Err("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.".into());
         }
         let _ = wait_until_free(Duration::from_secs(10));
-        let _ = system::set_starts_with_windows(false);
+        let _ = crate::startup::set_starts_with_windows(false);
     }
     if let Some(shortcut) = shortcut_path() {
         let _ = std::fs::remove_file(shortcut);
@@ -613,7 +613,7 @@ fn start_install(dialog: HWND) {
         let mut s = s.borrow_mut();
         (s.busy, s.target, s.shown, s.startup) = (true, 0, 0, startup);
         (s.steps, s.said) = (Vec::new(), None);
-        if crate::breaks::broken("setup.ignores-change") { default_install_dir() } else { s.dir.clone() }
+        s.dir.clone()
     }) else {
         return;
     };
@@ -789,7 +789,7 @@ pub fn run_setup_window() -> i32 {
                 let (text, button) = setup_texts(installed.as_deref().and_then(version_of), my_version());
                 set_text(dialog, IDC_TEXT, &text);
                 set_text(dialog, IDOK.0, button);
-                let startup = installed.is_none() || system::starts_with_windows();
+                let startup = installed.is_none() || crate::startup::starts_with_windows();
                 unsafe {
                     let _ = CheckDlgButton(dialog, IDC_CHOICE, if startup { BST_CHECKED } else { BST_UNCHECKED });
                 }

@@ -42,10 +42,6 @@ foreach ($local in @($env:USERPROFILE, $root, $env:USERNAME) | Where-Object { $_
         throw "The exe contains '$local': not packaging it."
     }
 }
-# No behaviour broken on purpose (src\breaks.rs: only with the test-break feature).
-foreach ($trace in 'break.txt', 'broken on purpose') {
-    if ($ascii.IndexOf($trace, [StringComparison]::Ordinal) -ge 0) { throw "The exe contains '$trace': it was built with the test-break feature. Not packaging it." }
-}
 
 $dist = Join-Path $root 'dist'
 $folder = Join-Path $dist "Desktop Dock $version"
