@@ -16,14 +16,14 @@
 //!
 //! Built from dialog templates (assets\desktop-dock.rc), so Windows scales them for the display.
 
-use crate::config::{self, DockLook, DockSettings, HoverGlow, ItemConfig, Kind, LaunchEffect, RunState};
+use crate::config::{self, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, Kind, LaunchEffect, RunState, StayOut};
 use crate::edit::{self, Spot};
 use crate::home::Home;
 use crate::icons::{self, IconLoader, IconSource, Pixels};
 use crate::removed::{Entry, Removed};
 use crate::hotkey;
 use crate::store::{Backup, BackupKind, Store};
-use crate::{chrome, drop, iconpicker, import, launch, pickers, places, system};
+use crate::{chrome, drop, iconpicker, import, launch, pickers, places, system, update};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -84,6 +84,11 @@ const IDC_OPEN_LOG: i32 = 1906;
 const IDC_INSPIRED: i32 = 1907;
 /// A red heart after the "inspired by" line.
 const IDC_HEART: i32 = 1908;
+const IDC_CHECK_UPDATES: i32 = 1909;
+const IDC_CHECK_NOW: i32 = 1910;
+const IDC_UPDATE_NOW: i32 = 1911;
+const IDC_WHATS_NEW: i32 = 1912;
+const IDC_UPDATE_STATUS: i32 = 1913;
 const IDC_SAVE_COPY: i32 = 1707;
 const IDC_LOAD_COPY: i32 = 1708;
 const IDC_IMPORT_ROCKETDOCK: i32 = 1709;
@@ -115,6 +120,7 @@ const IDC_LOOK: i32 = 1315;
 const IDC_HOVER_GLOW: i32 = 1316;
 const IDC_LOCKED: i32 = 1411;
 const IDC_STARTUP: i32 = 1412;
+const IDC_RESTING: i32 = 1413;
 const IDC_REMOVED_LIST: i32 = 1501;
 const IDC_PUT_BACK: i32 = 1502;
 const IDC_FORGET: i32 = 1503;
@@ -138,6 +144,8 @@ const WM_APP_ICONS: u32 = WM_APP + 2;
 const WM_APP_PICK_ICON: u32 = WM_APP + 4;
 /// The window moved to a screen with different scaling: its fonts follow (posted to itself).
 const WM_APP_RESTYLE: u32 = WM_APP + 5;
+/// A check for a new version, or its download, finished (see `start_update_work`).
+const WM_APP_UPDATES: u32 = WM_APP + 6;
 /// The dock reloads dock.toml at once when it gets this (dock.rs, WM_APP_RELOAD_NOW).
 const DOCK_RELOAD_NOW: u32 = WM_APP + 9;
 /// The dock comes out for a moment, to show a change (dock.rs, WM_APP_PEEK).
@@ -209,6 +217,8 @@ const IDC_SCREEN_NOTE: i32 = 2102;
 const IDC_SHORTCUT: i32 = 2103;
 const IDC_SHORTCUT_CLEAR: i32 = 2104;
 const IDC_SHORTCUT_NOTE: i32 = 2105;
+const IDC_EDGE: i32 = 2106;
+const IDC_TASKBAR_SETTINGS: i32 = 2107;
 /// The shortcut box (a hotkey control) changed.
 const EN_CHANGE: u32 = 0x0300;
 
@@ -354,6 +364,12 @@ struct Settings {
     /// Where each loaded icon sits in the list's image list.
     image_index: HashMap<Vec<IconSource>, i32>,
     arrived: Arc<Mutex<Vec<(Vec<IconSource>, Option<Pixels>, Option<Pixels>)>>>,
+    /// About > Updates: what's under way ("Checking..."), and what it came to (Ok: what to say;
+    /// Err: what went wrong).
+    update_busy: Option<&'static str>,
+    update_done: Arc<Mutex<Option<Result<String, String>>>>,
+    /// What this window's own Check now found (shown even if the dock folder can't keep it).
+    update_found: Arc<Mutex<Option<update::Status>>>,
     /// The Screen page's list: the `monitor` value each entry stands for.
     screen_choices: Vec<String>,
 }
@@ -684,7 +700,10 @@ pub fn run(home: Home, open: Open) -> i32 {
                     }
                 };
                 combo(IDC_LAUNCH_EFFECT, &[w!("None"), w!("Bounce"), w!("Glow pulse")]);
-                combo(IDC_LOOK, &[w!("Light"), w!("Dark")]);
+                combo(IDC_LOOK, &[w!("Light"), w!("Dark"), w!("Glass"), w!("Frosted"), w!("Capsule")]);
+                combo(IDC_SHOW_LABELS, &[w!("Never"), w!("On hover"), w!("Always")]);
+                combo(IDC_RESTING, &[w!("Slides out of sight"), w!("Stays out, behind windows"), w!("Stays out, on top of windows")]);
+                combo(IDC_EDGE, &[w!("Top"), w!("Bottom"), w!("Left"), w!("Right")]);
                 combo(IDC_HOVER_GLOW, &[w!("None"), w!("Windows accent colour"), w!("Each icon's own colour")]);
                 if let Ok(shortcut) = GetDlgItem(Some(pages[SECTION_SCREEN]), IDC_SHORTCUT) {
                     let instead = (hotkey::HOTKEYF_CONTROL | hotkey::HOTKEYF_SHIFT) as isize;
@@ -792,6 +811,9 @@ pub fn run(home: Home, open: Open) -> i32 {
             icons: HashMap::new(),
             image_index: HashMap::new(),
             arrived: Arc::new(Mutex::new(Vec::new())),
+            update_busy: None,
+            update_done: Arc::new(Mutex::new(None)),
+            update_found: Arc::new(Mutex::new(None)),
         };
         SETTINGS.with(|cell| *cell.borrow_mut() = Some(settings));
         with_settings(|s| {
@@ -1036,6 +1058,10 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             with_settings(|s| s.receive_icons());
             1
         }
+        WM_APP_UPDATES => {
+            with_settings(|s| s.receive_update());
+            1
+        }
         _ => 0,
     }
 }
@@ -1273,7 +1299,20 @@ impl Settings {
             }
         }
         self.screen_choices = choices.into_iter().map(|(id, _)| id).collect();
-        set_text(page, IDC_SCREEN_NOTE, system::choose_screen(&screens, &chosen).and_then(system::top_edge_note).unwrap_or(""));
+        // The edge, what to know about it there, and Windows' taskbar settings when the taskbar is
+        // on that edge (where it can be moved).
+        let edge = self.dock.edge;
+        let (note, taskbar_there) = system::choose_screen(&screens, &chosen).map_or((None, false), |screen| system::edge_note(screen, edge));
+        set_text(page, IDC_SCREEN_NOTE, note.unwrap_or(""));
+        unsafe {
+            if let Ok(combo) = GetDlgItem(Some(page), IDC_EDGE) {
+                let index = Edge::NAMES.iter().position(|&(_, e)| e == edge).unwrap_or(0);
+                SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+            }
+            if let Ok(button) = GetDlgItem(Some(page), IDC_TASKBAR_SETTINGS) {
+                let _ = ShowWindow(button, if taskbar_there { SW_SHOW } else { SW_HIDE });
+            }
+        }
         set_text(page, IDC_SHORTCUT_NOTE, "");
     }
 
@@ -1326,6 +1365,89 @@ impl Settings {
             if let (Ok(text), Ok(heart)) = (GetDlgItem(Some(page), IDC_INSPIRED), GetDlgItem(Some(page), IDC_HEART)) {
                 chrome::place_after_text(text, heart);
             }
+        }
+        self.set_check(IDC_CHECK_UPDATES, self.dock.check_updates);
+        self.show_update_status();
+    }
+
+    /// This copy is the installed one (Update now replaces that; a portable or development copy
+    /// gets the new version from GitHub instead).
+    fn installed_copy() -> bool {
+        std::env::current_exe().ok().zip(crate::setup::install_dir()).is_some_and(|(me, dir)| crate::setup::same_path(&me, &dir.join("desktop-dock.exe")))
+    }
+
+    /// About > Updates: what the last check found, in plain words, and whether Update now can
+    /// install it.
+    fn show_update_status(&mut self) {
+        // The dock folder's, or this window's own check if that's newer (the folder couldn't keep it).
+        let kept = update::Status::load(&self.home.dir);
+        let status = match self.update_found.lock().ok().and_then(|found| found.clone()) {
+            Some(found) if found.checked > kept.checked => found,
+            _ => kept,
+        };
+        let newer = status.latest_version().filter(|&version| update::is_newer(version, update::this_version()));
+        let installed = Settings::installed_copy();
+        let text = match (self.update_busy, newer) {
+            (Some(busy), _) => busy.to_string(),
+            _ if !status.error.is_empty() => format!("{} (Tried {}.)", status.error, status.checked),
+            (None, Some(version)) if installed => format!("Desktop Dock {} is out. Update now installs it; your dock stays just as it is.", update::shown(version)),
+            (None, Some(version)) => format!("Desktop Dock {} is out. This copy isn't the installed one, so get the new one from GitHub (What's new).", update::shown(version)),
+            (None, None) if !status.checked.is_empty() => format!("You have the newest version. Checked {}.", status.checked),
+            (None, None) => "Not checked yet. Checking asks GitHub which version is the newest; nothing about you or your PC is sent.".to_string(),
+        };
+        set_text(self.pages[SECTION_ABOUT], IDC_UPDATE_STATUS, &text);
+        for (id, on) in [(IDC_UPDATE_NOW, newer.is_some() && installed && self.update_busy.is_none()), (IDC_CHECK_NOW, self.update_busy.is_none())] {
+            if let Some(button) = self.control(id) {
+                unsafe {
+                    let _ = EnableWindow(button, on);
+                }
+            }
+        }
+    }
+
+    /// Check now (`install` false) or Update now (true), away from the window's own thread: the
+    /// window stays usable, and says what happened when it's done.
+    fn start_update_work(&mut self, install: bool) {
+        if self.update_busy.is_some() {
+            return;
+        }
+        let version = update::Status::load(&self.home.dir).latest_version();
+        // (Update now only replaces the installed copy, and only with something newer.)
+        if install && !(Settings::installed_copy() && version.is_some_and(|version| update::is_newer(version, update::this_version()))) {
+            return;
+        }
+        self.update_busy = Some(if install { "Downloading the new version..." } else { "Checking..." });
+        self.show_update_status();
+        let (home, done, found, page) = (self.home.dir.clone(), self.update_done.clone(), self.update_found.clone(), self.pages[SECTION_ABOUT].0 as isize);
+        std::thread::spawn(move || {
+            let outcome = match (install, version) {
+                (true, Some(version)) => update::install(version, &home)
+                    .map(|()| format!("Installing Desktop Dock {}: the dock closes and starts again in a moment.", update::shown(version))),
+                _ => {
+                    let status = update::check_and_keep(&home);
+                    if let Ok(mut slot) = found.lock() {
+                        *slot = Some(status);
+                    }
+                    Ok(String::new())
+                }
+            };
+            if let Ok(mut slot) = done.lock() {
+                *slot = Some(outcome);
+            }
+            unsafe {
+                let _ = PostMessageW(Some(HWND(page as *mut c_void)), WM_APP_UPDATES, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    fn receive_update(&mut self) {
+        let Some(outcome) = self.update_done.lock().ok().and_then(|mut slot| slot.take()) else { return };
+        self.update_busy = None;
+        self.show_update_status();
+        match outcome {
+            Ok(said) if !said.is_empty() => set_text(self.pages[SECTION_ABOUT], IDC_UPDATE_STATUS, &said),
+            Ok(_) => {}
+            Err(e) => set_text(self.pages[SECTION_ABOUT], IDC_UPDATE_STATUS, &e),
         }
     }
 
@@ -1392,7 +1514,6 @@ impl Settings {
                 self.show_value(slider, value);
             }
         }
-        self.set_check(IDC_SHOW_LABELS, self.dock.show_labels);
         self.set_check(IDC_LOCKED, self.dock.locked);
         self.set_check(IDC_STARTUP, crate::startup::starts_with_windows());
         let pick = |id: i32, choice: usize| {
@@ -1410,7 +1531,25 @@ impl Settings {
                 LaunchEffect::Glow => 2,
             },
         );
-        pick(IDC_LOOK, if self.dock.look == DockLook::Dark { 1 } else { 0 });
+        pick(
+            IDC_LOOK,
+            match self.dock.style {
+                DockStyle::Classic if self.dock.look == DockLook::Dark => 1,
+                DockStyle::Classic => 0,
+                DockStyle::Glass => 2,
+                DockStyle::Frosted => 3,
+                DockStyle::Capsule => 4,
+            },
+        );
+        pick(IDC_SHOW_LABELS, if !self.dock.show_labels { 0 } else if self.dock.always_show_labels { 2 } else { 1 });
+        pick(
+            IDC_RESTING,
+            match (self.dock.auto_hide, self.dock.stay_out) {
+                (true, _) => 0,
+                (false, StayOut::BehindWindows) => 1,
+                (false, StayOut::OnTop) => 2,
+            },
+        );
         pick(
             IDC_HOVER_GLOW,
             match self.dock.hover_glow {
@@ -1788,9 +1927,18 @@ impl Settings {
     /// The buttons and lists on the pages other than Items. None: not one of theirs.
     fn page_command(&mut self, id: i32, code: u32) -> Option<Option<Ask>> {
         match (id, code) {
-            (IDC_SHOW_LABELS, BN_CLICKED) => {
-                let on = self.checked(IDC_SHOW_LABELS);
-                self.change("Show names", None, true, |doc| edit::set_dock(doc, "show_labels", on));
+            (IDC_SHOW_LABELS, CBN_SELCHANGE) => {
+                // Never, On hover (the name under the icon you point at), Always (every name).
+                let choice = self.control(IDC_SHOW_LABELS).map_or(1, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
+                self.change("Show names", None, true, |doc| {
+                    edit::set_dock(doc, "show_labels", choice != 0)?;
+                    edit::set_dock(doc, "always_show_labels", choice == 2)
+                });
+                if let Some(label_size) = self.control(IDC_LABEL_SIZE) {
+                    unsafe {
+                        let _ = EnableWindow(label_size, choice != 0);
+                    }
+                }
             }
             (IDC_LAUNCH_EFFECT, CBN_SELCHANGE) => {
                 let choice = self.control(IDC_LAUNCH_EFFECT).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
@@ -1829,8 +1977,41 @@ impl Settings {
                 self.change("Hover glow", None, true, |doc| edit::set_dock(doc, "hover_glow", word));
             }
             (IDC_LOOK, CBN_SELCHANGE) => {
-                let dark = self.control(IDC_LOOK).is_some_and(|combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } == 1);
-                self.change("Dock look", None, true, |doc| edit::set_dock(doc, "look", if dark { "dark" } else { "light" }));
+                // Light and Dark are the classic style's two looks; the others are styles of their
+                // own (the capsule light or dark with Windows).
+                let choice = self.control(IDC_LOOK).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
+                let (style, look) = match choice {
+                    1 => ("classic", Some("dark")),
+                    2 => ("glass", None),
+                    3 => ("frosted", None),
+                    4 => ("capsule", None),
+                    _ => ("classic", Some("light")),
+                };
+                self.change("Dock look", None, true, |doc| {
+                    edit::set_dock(doc, "style", style)?;
+                    match look {
+                        Some(look) => edit::set_dock(doc, "look", look),
+                        None => Ok(()),
+                    }
+                });
+            }
+            (IDC_EDGE, CBN_SELCHANGE) => {
+                let choice = self.control(IDC_EDGE).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } as usize);
+                let (word, _) = Edge::NAMES[choice.min(Edge::NAMES.len() - 1)];
+                self.change("Screen edge", None, true, |doc| edit::set_dock(doc, "edge", word));
+                self.fill_screen();
+            }
+            (IDC_TASKBAR_SETTINGS, BN_CLICKED) => launch::open(Path::new("ms-settings:taskbar")),
+            (IDC_RESTING, CBN_SELCHANGE) => {
+                // Slides out of sight (auto_hide), or stays out behind windows or on top of them.
+                let choice = self.control(IDC_RESTING).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
+                self.change("When you're not using it", None, true, |doc| match choice {
+                    1 | 2 => {
+                        edit::set_dock(doc, "auto_hide", false)?;
+                        edit::set_dock(doc, "stay_out", if choice == 2 { "on-top" } else { "behind-windows" })
+                    }
+                    _ => edit::set_dock(doc, "auto_hide", true),
+                });
             }
             (IDC_LOCKED, BN_CLICKED) => {
                 let on = self.checked(IDC_LOCKED);
@@ -1859,6 +2040,18 @@ impl Settings {
             }
             (IDC_CLEAR_CACHE, BN_CLICKED) => self.clear_icon_cache(),
             (IDC_OPEN_LOG, BN_CLICKED) => launch::edit(&self.home.dir.join("logs").join("dock.log")),
+            (IDC_CHECK_UPDATES, BN_CLICKED) => {
+                let on = self.checked(IDC_CHECK_UPDATES);
+                self.change("Check for a new version once a day", None, false, |doc| edit::set_dock(doc, "check_updates", on));
+            }
+            (IDC_CHECK_NOW, BN_CLICKED) => self.start_update_work(false),
+            (IDC_UPDATE_NOW, BN_CLICKED) => self.start_update_work(true),
+            (IDC_WHATS_NEW, BN_CLICKED) => {
+                // The newest release's page on GitHub (its notes say what's new), in the browser.
+                let found = update::Status::load(&self.home.dir).latest_version();
+                let page = found.map_or(format!("{}/latest", update::RELEASES), |version| format!("{}/tag/v{}", update::RELEASES, update::shown(version)));
+                launch::open(Path::new(&page));
+            }
             (IDC_SAVE_COPY, BN_CLICKED) => return Some(Some(Ask::SaveCopy)),
             (IDC_LOAD_COPY, BN_CLICKED) => return Some(Some(Ask::LoadCopy)),
             (IDC_IMPORT_ROCKETDOCK, BN_CLICKED) => {

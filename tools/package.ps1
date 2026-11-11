@@ -2,7 +2,8 @@
 .SYNOPSIS
   Builds the release package: dist\Desktop Dock <version>\ with desktop-dock.exe, README.txt and
   THIRD-PARTY-NOTICES.txt (the licences of the Rust crates built into it), a zip of that folder
-  and its SHA-256. The program installs itself: whoever downloads it runs desktop-dock.exe.
+  and its SHA-256, and dist\update-<version>\ with the exe and its SHA-256 for Update now (both
+  attached to the release). The program installs itself: whoever downloads it runs desktop-dock.exe.
   The build has line tables for crash diagnosis in a separate .pdb (dist\symbols, not shipped),
   and no paths from this PC inside the exe (checked).
 .EXAMPLE
@@ -33,14 +34,19 @@ if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($built)) -match '(?
     throw "The exe needs $($Matches[0]), which a fresh Windows doesn't have: build it with the C runtime built in (.cargo\config.toml)."
 }
 
-# Nothing from this PC inside the exe: no user folder, no project folder.
+# Nothing from this PC inside the exe: no user folder, no project folder, and no user name (as a
+# name of its own, as in a path: not inside another word, such as the project's own address).
 $bytes = [IO.File]::ReadAllBytes($built)
 $ascii = [Text.Encoding]::ASCII.GetString($bytes)
 $wide = [Text.Encoding]::Unicode.GetString($bytes)
-foreach ($local in @($env:USERPROFILE, $root, $env:USERNAME) | Where-Object { $_ -and $_.Length -ge 4 }) {
+foreach ($local in @($env:USERPROFILE, $root) | Where-Object { $_ -and $_.Length -ge 4 }) {
     if ($ascii.IndexOf($local, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $wide.IndexOf($local, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         throw "The exe contains '$local': not packaging it."
     }
+}
+if ($env:USERNAME -and $env:USERNAME.Length -ge 4) {
+    $name = "(?i)(?<![a-z0-9])$([regex]::Escape($env:USERNAME))(?![a-z0-9])"
+    if ($ascii -match $name -or $wide -match $name) { throw "The exe contains the user name '$($Matches[0])': not packaging it." }
 }
 
 $dist = Join-Path $root 'dist'
@@ -84,10 +90,18 @@ if (Test-Path $zip) { [IO.File]::Delete($zip) }
 Compress-Archive -Path (Join-Path $folder '*') -DestinationPath $zip
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
 "$hash  DesktopDock-$version.zip" | Set-Content (Join-Path $dist "DesktopDock-$version.zip.sha256") -Encoding ASCII
+# For Update now (Dock settings > About): the exe on its own and its SHA-256, attached to the
+# release under these exact names (the dock fetches releases/download/v<version>/desktop-dock.exe).
+$updates = Join-Path $dist "update-$version"
+if (Test-Path $updates) { [IO.Directory]::Delete($updates, $true) }
+New-Item -ItemType Directory -Force $updates | Out-Null
+Copy-Item $built (Join-Path $updates 'desktop-dock.exe')
+"$((Get-FileHash $built -Algorithm SHA256).Hash)  desktop-dock.exe" | Set-Content (Join-Path $updates 'desktop-dock.exe.sha256') -Encoding ASCII
 "Packaged Desktop Dock $version"
 "  $folder (exe $([math]::Round((Get-Item (Join-Path $folder 'desktop-dock.exe')).Length / 1KB)) KB, README.txt, THIRD-PARTY-NOTICES.txt: $($shipped.Count) crates)"
 "  $zip"
 "  SHA-256 $hash"
 # (The exe's own: what a build from the same source gives, byte for byte.)
 "  exe SHA-256 $((Get-FileHash $built -Algorithm SHA256).Hash)"
+"  for Update now: $updates (desktop-dock.exe and desktop-dock.exe.sha256: attach both to the release)"
 "  symbols: dist\symbols\desktop_dock-$version.pdb (keep; not shipped)"

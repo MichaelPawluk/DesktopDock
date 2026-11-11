@@ -26,6 +26,9 @@ pub struct DockSettings {
     /// How long the slide back up takes. 0 = vanish instantly.
     pub slide_out_ms: u64,
     pub show_labels: bool,
+    /// Every icon's name under it all the time, not only the one under the pointer (with
+    /// `show_labels` on). Long names are cut short with "…".
+    pub always_show_labels: bool,
     /// Label text size, in logical pixels.
     pub label_size: f32,
     /// How solid the dock's background (panel, edge and shadow) is, in percent. 0 = icons only.
@@ -35,8 +38,11 @@ pub struct DockSettings {
     pub launch_effect: LaunchEffect,
     /// Icons can't be dragged around or off the dock (right-click → Lock icons).
     pub locked: bool,
-    /// The dock's panel: light (CrystalXP-style, the default) or dark.
+    /// The dock's panel: light (CrystalXP-style, the default) or dark. Used by the classic style.
     pub look: DockLook,
+    /// The panel's style: classic (the light or dark panel of `look`, the default), glass,
+    /// frosted, or capsule (floating, light or dark with Windows' app mode).
+    pub style: DockStyle,
     /// A soft glow behind the icon under the pointer: none (the default), Windows' accent
     /// colour, or each icon's own main colour.
     pub hover_glow: HoverGlow,
@@ -46,6 +52,51 @@ pub struct DockSettings {
     /// A keyboard shortcut that brings the dock out, like "Ctrl+Shift+D"; empty for none (the
     /// default). See `hotkey::parse`.
     pub hotkey: String,
+    /// Ask GitHub once a day whether there's a newer version, and say so once if there is
+    /// (Dock settings > About). Off unless ticked: the dock goes online only for this.
+    pub check_updates: bool,
+    /// The dock slides out of sight when you're not using it (the default; RocketDock's
+    /// AutoHide). Off: it stays out, in the way `stay_out` says (right-click > Hide automatically).
+    pub auto_hide: bool,
+    /// How it stays out when it doesn't hide: behind windows (they cover it; resting the pointer
+    /// at the edge brings it over them) or on top of them.
+    pub stay_out: StayOut,
+    /// The screen edge the dock is on (Settings > Screen): top (the default), bottom, left or right.
+    pub edge: Edge,
+}
+
+/// A screen edge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Edge {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Edge {
+    pub const NAMES: &[(&str, Edge)] = &[("top", Edge::Top), ("bottom", Edge::Bottom), ("left", Edge::Left), ("right", Edge::Right)];
+
+    /// Along the left or right edge: the dock runs down the screen.
+    pub fn is_side(self) -> bool {
+        matches!(self, Edge::Left | Edge::Right)
+    }
+}
+
+/// How the dock stays out when it doesn't hide (see `DockSettings::stay_out`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StayOut {
+    /// On the desktop: windows cover it; resting the pointer at the edge brings it over them
+    /// until the pointer leaves (RocketDock's Normal layering with Popup on Mouseover).
+    #[default]
+    BehindWindows,
+    /// Over every window (RocketDock's Always on top).
+    OnTop,
+}
+
+impl StayOut {
+    pub const NAMES: &[(&str, StayOut)] = &[("behind-windows", StayOut::BehindWindows), ("on-top", StayOut::OnTop)];
 }
 
 impl Default for DockSettings {
@@ -60,15 +111,21 @@ impl Default for DockSettings {
             slide_in_ms: 250, // RocketDock's "AutoHideTicks"
             slide_out_ms: 250,
             show_labels: true,
+            always_show_labels: false,
             label_size: 12.5,
             background_opacity: 100,
             icon_opacity: 100,
             launch_effect: LaunchEffect::Bounce,
             locked: false,
             look: DockLook::Light,
+            style: DockStyle::Classic,
             hover_glow: HoverGlow::None,
             monitor: "main".into(),
             hotkey: String::new(),
+            check_updates: false,
+            auto_hide: true,
+            stay_out: StayOut::BehindWindows,
+            edge: Edge::Top,
         }
     }
 }
@@ -93,12 +150,48 @@ pub enum RunState {
 }
 
 /// The dock's look: a light panel (the default) or a dark one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DockLook {
     #[default]
     Light,
     Dark,
+}
+
+impl DockLook {
+    pub const NAMES: &[(&str, DockLook)] = &[("light", DockLook::Light), ("dark", DockLook::Dark)];
+}
+
+/// The panel's style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DockStyle {
+    /// The light or dark panel of `look`, hanging from the screen edge.
+    #[default]
+    Classic,
+    /// Almost clear, with a bright rim and rounder corners.
+    Glass,
+    /// Milky white, readable on any wallpaper.
+    Frosted,
+    /// Floats just below the screen edge, with round ends; light or dark with Windows' app mode.
+    Capsule,
+}
+
+impl DockStyle {
+    pub const NAMES: &[(&str, DockStyle)] =
+        &[("classic", DockStyle::Classic), ("glass", DockStyle::Glass), ("frosted", DockStyle::Frosted), ("capsule", DockStyle::Capsule)];
+}
+
+/// A word from a list (`look`, `style`): one the dock doesn't know (a typo, or a choice from a
+/// newer version) gives the default with a warning, so the file still loads.
+fn choice<T: Copy>(key: &str, word: Option<&str>, names: &[(&str, T)], default: T, warnings: &mut Vec<String>) -> T {
+    let Some(word) = word else { return default };
+    match names.iter().find(|(name, _)| name.eq_ignore_ascii_case(word.trim())) {
+        Some(&(_, value)) => value,
+        None => {
+            let known: Vec<&str> = names.iter().map(|(name, _)| *name).collect();
+            warnings.push(format!("[dock] {key} = \"{word}\" isn't one of {}; using {}", known.join(", "), names[0].0));
+            default
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -204,15 +297,21 @@ struct RawDock {
     slide_in_ms: Option<u64>,
     slide_out_ms: Option<u64>,
     show_labels: Option<bool>,
+    always_show_labels: Option<bool>,
     label_size: Option<f32>,
     background_opacity: Option<u32>,
     icon_opacity: Option<u32>,
     launch_effect: Option<LaunchEffect>,
     locked: Option<bool>,
-    look: Option<DockLook>,
+    look: Option<String>,
+    style: Option<String>,
     hover_glow: Option<HoverGlow>,
     monitor: Option<String>,
     hotkey: Option<String>,
+    check_updates: Option<bool>,
+    auto_hide: Option<bool>,
+    stay_out: Option<String>,
+    edge: Option<String>,
     /// Version 0: zoom as a multiple of icon_size.
     hover_scale: Option<f32>,
 }
@@ -220,8 +319,9 @@ struct RawDock {
 const ROOT_KEYS: &[&str] = &["version", "dock", "item"];
 pub(crate) const DOCK_KEYS: &[&str] = &[
     "icon_size", "zoom_size", "zoom_ms", "spacing", "popup_delay_ms", "hide_delay_ms",
-    "slide_in_ms", "slide_out_ms", "show_labels", "label_size", "background_opacity", "icon_opacity", "launch_effect",
-    "locked", "look", "hover_glow", "monitor", "hotkey", "hover_scale",
+    "slide_in_ms", "slide_out_ms", "show_labels", "always_show_labels", "label_size", "background_opacity", "icon_opacity",
+    "launch_effect", "locked", "look", "style", "hover_glow", "monitor", "hotkey", "check_updates", "auto_hide", "stay_out",
+    "edge", "hover_scale",
 ];
 pub(crate) const ITEM_KEYS: &[&str] = &[
     "kind", "name", "target", "app_id", "args", "start_in", "icon", "run", "admin", "items", "separator",
@@ -306,12 +406,14 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         slide_in_ms: clamp_ms("slide_in_ms", r.slide_in_ms, d.slide_in_ms, 2000),
         slide_out_ms: clamp_ms("slide_out_ms", r.slide_out_ms, d.slide_out_ms, 2000),
         show_labels: r.show_labels.unwrap_or(d.show_labels),
+        always_show_labels: r.always_show_labels.unwrap_or(d.always_show_labels),
         label_size,
         background_opacity,
         icon_opacity,
         launch_effect: r.launch_effect.unwrap_or(d.launch_effect),
         locked: r.locked.unwrap_or(d.locked),
-        look: r.look.unwrap_or(d.look),
+        look: choice("look", r.look.as_deref(), DockLook::NAMES, d.look, &mut warnings),
+        style: choice("style", r.style.as_deref(), DockStyle::NAMES, d.style, &mut warnings),
         hover_glow: r.hover_glow.unwrap_or(d.hover_glow),
         monitor: r.monitor.clone().filter(|m| !m.trim().is_empty()).unwrap_or(d.monitor),
         hotkey: match r.hotkey.as_deref().map(crate::hotkey::parse) {
@@ -322,6 +424,10 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             }
             _ => String::new(),
         },
+        check_updates: r.check_updates.unwrap_or(d.check_updates),
+        auto_hide: r.auto_hide.unwrap_or(d.auto_hide),
+        stay_out: choice("stay_out", r.stay_out.as_deref(), StayOut::NAMES, d.stay_out, &mut warnings),
+        edge: choice("edge", r.edge.as_deref(), Edge::NAMES, d.edge, &mut warnings),
     };
 
     let mut items = raw.items;
@@ -650,6 +756,53 @@ background_opacity = 250
 icon_opacity = 0");
         assert_eq!((wild.config.dock.label_size, wild.config.dock.background_opacity, wild.config.dock.icon_opacity), (8.0, 100, 10));
         assert_eq!(wild.warnings.len(), 3, "an icon can't vanish entirely: {:?}", wild.warnings);
+    }
+
+    #[test]
+    fn styles_and_always_shown_names() {
+        let plain = ok("version = 1\n[dock]\nicon_size = 53");
+        assert_eq!((plain.config.dock.style, plain.config.dock.look, plain.config.dock.always_show_labels), (DockStyle::Classic, DockLook::Light, false));
+        for (word, style) in [("classic", DockStyle::Classic), ("glass", DockStyle::Glass), ("Frosted", DockStyle::Frosted), (" capsule ", DockStyle::Capsule)] {
+            let parsed = ok(&format!("version = 1\n[dock]\nstyle = \"{word}\"\nlook = \"dark\"\nalways_show_labels = true"));
+            assert_eq!((parsed.config.dock.style, parsed.config.dock.look, parsed.config.dock.always_show_labels), (style, DockLook::Dark, true), "{word}");
+            assert!(parsed.warnings.is_empty(), "{word}: {:?}", parsed.warnings);
+        }
+    }
+
+    #[test]
+    fn hiding_by_default_or_staying_out_behind_windows_or_on_top() {
+        let plain = ok("version = 1\n[dock]\nicon_size = 53");
+        assert_eq!((plain.config.dock.auto_hide, plain.config.dock.stay_out), (true, StayOut::BehindWindows));
+        let on_top = ok("version = 1\n[dock]\nauto_hide = false\nstay_out = \"on-top\"");
+        assert_eq!((on_top.config.dock.auto_hide, on_top.config.dock.stay_out), (false, StayOut::OnTop));
+        assert!(on_top.warnings.is_empty(), "{:?}", on_top.warnings);
+        let odd = ok("version = 1\n[dock]\nauto_hide = false\nstay_out = \"floating\"");
+        assert_eq!((odd.config.dock.auto_hide, odd.config.dock.stay_out), (false, StayOut::BehindWindows));
+        assert_eq!(odd.warnings.len(), 1, "{:?}", odd.warnings);
+    }
+
+    #[test]
+    fn the_dock_is_on_the_top_edge_unless_another_is_chosen() {
+        assert_eq!(ok("version = 1\n[dock]\nicon_size = 53").config.dock.edge, Edge::Top);
+        for (name, edge) in Edge::NAMES {
+            let parsed = ok(&format!("version = 1\n[dock]\nedge = \"{name}\""));
+            assert_eq!(parsed.config.dock.edge, *edge);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        }
+        // A newer dock's edge, or a typo: the top, with a warning, and the rest still loads.
+        let odd = ok("version = 1\n[dock]\nedge = \"middle\"\nicon_size = 53");
+        assert_eq!((odd.config.dock.edge, odd.config.dock.icon_size), (Edge::Top, 53.0));
+        assert_eq!(odd.warnings.len(), 1, "{:?}", odd.warnings);
+        assert!(Edge::Left.is_side() && Edge::Right.is_side() && !Edge::Top.is_side() && !Edge::Bottom.is_side());
+    }
+
+    #[test]
+    fn a_style_or_look_this_dock_doesnt_know_gives_the_default_with_a_warning() {
+        // A newer dock's style, or a typo: the file still loads, so going back a version works.
+        let parsed = ok("version = 1\n[dock]\nstyle = \"neon\"\nlook = \"purple\"");
+        assert_eq!((parsed.config.dock.style, parsed.config.dock.look), (DockStyle::Classic, DockLook::Light));
+        assert_eq!(parsed.warnings.len(), 2, "{:?}", parsed.warnings);
+        assert!(parsed.warnings.iter().any(|w| w.contains("style") && w.contains("neon") && w.contains("classic, glass, frosted, capsule")), "{:?}", parsed.warnings);
     }
 
     #[test]

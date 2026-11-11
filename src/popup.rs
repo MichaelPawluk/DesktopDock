@@ -17,6 +17,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
 
+use crate::config::Edge;
+
 /// A rectangle in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
@@ -54,15 +56,19 @@ pub struct Params {
     pub scale: f32,
     /// The height of one line of names (the font's own line height).
     pub line_h: f32,
-    /// The middle of the group's icon, where the pop-up hangs from.
+    /// The middle of the group's icon along the dock's edge (screen x on top or bottom, y on a
+    /// side), where the pop-up hangs from.
     pub anchor_x: f32,
-    /// Where the pop-up's panel starts (just below how far the dock's icons reach).
+    /// Where the pop-up's panel starts, just past how far the dock's icons reach from its edge:
+    /// a screen y below the dock on top, above it on the bottom; a screen x on a side.
     pub top: f32,
-    /// The screen's left and right edges, and how far down the pop-up may reach (above a
-    /// taskbar at the bottom).
+    /// The screen's work area (beside its taskbar): the pop-up stays inside it.
     pub screen_left: f32,
     pub screen_right: f32,
+    pub screen_top: f32,
     pub screen_bottom: f32,
+    /// The dock's edge: the pop-up opens away from it.
+    pub edge: Edge,
 }
 
 /// One item's place in the pop-up (window coordinates).
@@ -114,10 +120,19 @@ pub fn layout(p: &Params) -> Layout {
     let cell_h = (margin + p.icon + label_gap + 2.0 * p.line_h + margin).round();
     let title_h = (p.line_h + 8.0 * s).round();
     let square = ((count as f32).sqrt().ceil() as usize).clamp(1, MAX_COLUMNS).min(count);
-    // Rows that fit between the pop-up's top and the screen's bottom, and columns across it.
-    let room_down = p.screen_bottom - screen_margin - (p.top - shadow) - 2.0 * shadow - pad - title_h;
+    // Rows that fit between where the pop-up starts and the far side of the screen, and columns
+    // across it (on a side, it opens across the screen and runs along the edge).
+    let room_away = match p.edge {
+        Edge::Top | Edge::Left => (if p.edge == Edge::Top { p.screen_bottom } else { p.screen_right }) - screen_margin - (p.top - shadow) - 2.0 * shadow,
+        Edge::Bottom | Edge::Right => (p.top + shadow) - (if p.edge == Edge::Bottom { p.screen_top } else { p.screen_left }) - screen_margin - 2.0 * shadow,
+    };
+    let (room_down, room_across) = if p.edge.is_side() {
+        (p.screen_bottom - p.screen_top - 2.0 * screen_margin - 2.0 * shadow - pad - title_h, room_away - 2.0 * pad)
+    } else {
+        (room_away - pad - title_h, p.screen_right - p.screen_left - 2.0 * screen_margin - 2.0 * shadow - 2.0 * pad)
+    };
     let fit_rows = ((room_down / cell_h).floor() as usize).max(1);
-    let fit_columns = (((p.screen_right - p.screen_left - 2.0 * screen_margin - 2.0 * shadow - 2.0 * pad) / cell_w).floor() as usize).max(1);
+    let fit_columns = ((room_across / cell_w).floor() as usize).max(1);
     let columns = square.max(count.div_ceil(fit_rows)).min(fit_columns.max(square)).min(count);
     let rows = count.div_ceil(columns);
     let panel_w = 2.0 * pad + columns as f32 * cell_w;
@@ -136,11 +151,19 @@ pub fn layout(p: &Params) -> Layout {
     let title = Rect::new(shadow + pad, shadow + pad * 0.5, shadow + panel_w - pad, shadow + pad * 0.5 + title_h);
     let width = (panel_w + 2.0 * shadow).ceil();
     let height = (panel_h + 2.0 * shadow).ceil();
-    // Centred under the group's icon, but always fully on the screen.
-    let lowest = p.screen_left + screen_margin;
-    let highest = (p.screen_right - screen_margin - width).max(lowest);
-    let x = (p.anchor_x - width / 2.0).clamp(lowest, highest).round() as i32;
-    let y = (p.top - shadow).round() as i32;
+    // Centred on the group's icon along the edge, but always fully on the screen; away from the
+    // edge, just past the dock.
+    let centred = |size: f32, from: f32, to: f32| {
+        let lowest = from + screen_margin;
+        let highest = (to - screen_margin - size).max(lowest);
+        (p.anchor_x - size / 2.0).clamp(lowest, highest).round() as i32
+    };
+    let (x, y) = match p.edge {
+        Edge::Top => (centred(width, p.screen_left, p.screen_right), (p.top - shadow).round() as i32),
+        Edge::Bottom => (centred(width, p.screen_left, p.screen_right), (p.top + shadow - height).round() as i32),
+        Edge::Left => ((p.top - shadow).round() as i32, centred(height, p.screen_top, p.screen_bottom)),
+        Edge::Right => ((p.top + shadow - width).round() as i32, centred(height, p.screen_top, p.screen_bottom)),
+    };
     let panel = Rect::new(shadow, shadow, shadow + panel_w, shadow + panel_h);
     Layout { x, y, width: width as i32, height: height as i32, panel, title, cells, radius, shadow, margin }
 }
@@ -363,7 +386,7 @@ mod tests {
     use super::*;
 
     fn params(count: usize) -> Params {
-        Params { count, icon: 80.0, scale: 1.5, line_h: 27.0, anchor_x: 1900.0, top: 200.0, screen_left: 0.0, screen_right: 3840.0, screen_bottom: 2160.0 }
+        Params { count, icon: 80.0, scale: 1.5, line_h: 27.0, anchor_x: 1900.0, top: 200.0, screen_left: 0.0, screen_right: 3840.0, screen_top: 0.0, screen_bottom: 2160.0, edge: Edge::Top }
     }
 
     #[test]
@@ -423,6 +446,40 @@ mod tests {
             p.anchor_x = anchor;
             let l = layout(&p);
             assert!(l.x >= 0 && l.x + l.width <= 3840, "anchor {anchor}: {} + {}", l.x, l.width);
+        }
+    }
+
+    #[test]
+    fn on_every_edge_it_opens_away_from_the_dock_and_stays_inside_the_work_area() {
+        // A 1920 x 1080 screen at 150%, the dock's icons reaching 150 pixels from its edge.
+        let screen = |edge, anchor, top, count| Params {
+            count,
+            anchor_x: anchor,
+            top,
+            edge,
+            screen_left: 0.0,
+            screen_right: 1920.0,
+            screen_top: 0.0,
+            screen_bottom: 1080.0,
+            ..params(count)
+        };
+        for count in [1, 5, 13, 30] {
+            let bottom = layout(&screen(Edge::Bottom, 960.0, 1080.0 - 150.0, count));
+            assert_eq!(bottom.y as f32 + bottom.panel.bottom, 930.0, "{count} items: on the bottom, the panel ends where asked");
+            assert!(bottom.y >= 0 && bottom.x >= 0 && bottom.x + bottom.width <= 1920, "{count} items: on the screen");
+            let left = layout(&screen(Edge::Left, 540.0, 150.0, count));
+            assert_eq!(left.x as f32 + left.panel.left, 150.0, "{count} items: on the left, the panel starts where asked");
+            assert!(left.y >= 0 && left.y + left.height <= 1080 && left.x + left.width <= 1920, "{count} items: on the screen");
+            let right = layout(&screen(Edge::Right, 540.0, 1920.0 - 150.0, count));
+            assert_eq!(right.x as f32 + right.panel.right, 1770.0, "{count} items: on the right, the panel ends where asked");
+            assert!(right.y >= 0 && right.y + right.height <= 1080 && right.x >= 0, "{count} items: on the screen");
+        }
+        // On a side it's centred on the group's icon up and down, but kept on the screen.
+        let middle = layout(&screen(Edge::Left, 540.0, 150.0, 4));
+        assert!(((middle.y as f32 + middle.height as f32 / 2.0) - 540.0).abs() <= 1.0);
+        for anchor in [0.0, 1080.0] {
+            let l = layout(&screen(Edge::Right, anchor, 1770.0, 9));
+            assert!(l.y >= 0 && l.y + l.height <= 1080, "anchor {anchor}: {} + {}", l.y, l.height);
         }
     }
 

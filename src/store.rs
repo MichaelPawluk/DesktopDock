@@ -449,10 +449,15 @@ pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<(
     let mut tmp_name = path.as_os_str().to_owned();
     tmp_name.push(format!(".{}-{}.tmp", std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp_name);
-    {
+    let written = (|| {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?; // FlushFileBuffers
+        file.sync_all() // FlushFileBuffers
+    })();
+    if let Err(e) = written {
+        // (A disk that's full: no half-written file is left behind.)
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     let (from, to) = (HSTRING::from(tmp.as_os_str()), HSTRING::from(path.as_os_str()));
     let mut last_error = None;

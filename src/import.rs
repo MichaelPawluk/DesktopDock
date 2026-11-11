@@ -166,6 +166,22 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
     out.push_str(&format!("show_labels = {}\n", setting("HideLabels") != "1"));
     let effect = if setting("IconActivationFX") == "0" { "none" } else { "bounce" };
     out.push_str(&format!("launch_effect = \"{effect}\"\n"));
+    // Where it is, and whether it hides: RocketDock's Screen Position (Top, Bottom, Left, Right)
+    // and Autohide; when it doesn't hide, its Layering (Always on top, or Normal and Always on
+    // bottom, where windows cover it).
+    let edge = match number("Side", 0) {
+        1 => "bottom",
+        2 => "left",
+        3 => "right",
+        _ => "top",
+    };
+    out.push_str(&format!("edge = \"{edge}\"   # RocketDock: Side\n"));
+    let hides = setting("AutoHide") != "0";
+    out.push_str(&format!("auto_hide = {hides}   # RocketDock: AutoHide\n"));
+    if !hides {
+        let stay_out = if number("zOrderMode", 0) == 0 { "on-top" } else { "behind-windows" };
+        out.push_str(&format!("stay_out = \"{stay_out}\"   # RocketDock: zOrderMode\n"));
+    }
 
     let count: usize = rd.icons.get("count").and_then(|c| c.trim().parse().ok()).unwrap_or(0);
     let mut dropped_icons = 0;
@@ -394,5 +410,30 @@ mod tests {
         assert!(report.contains("app-1.0.9158"), "{report}");
         assert!(report.contains("Example Editor 2026"), "{report}");
         assert!(report.contains("couldn't be brought over"), "{report}");
+    }
+
+    #[test]
+    fn rocketdocks_position_and_hiding_come_over() {
+        let dock = |changes: &[(&str, &str)]| {
+            let mut rd = backup();
+            for (key, value) in changes {
+                rd.settings.insert(key.to_string(), value.to_string());
+            }
+            let imported = convert(&rd, fake_exists, fake_icon_count);
+            let parsed = config::parse(&imported.text).unwrap_or_else(|e| panic!("{e}\n{}", imported.text));
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            let d = parsed.config.dock;
+            (d.edge, d.auto_hide, d.stay_out)
+        };
+        use config::{Edge, StayOut};
+        // The sample: on top, hiding.
+        assert_eq!(dock(&[]), (Edge::Top, true, StayOut::BehindWindows));
+        for (side, edge) in [("0", Edge::Top), ("1", Edge::Bottom), ("2", Edge::Left), ("3", Edge::Right), ("7", Edge::Top)] {
+            assert_eq!(dock(&[("Side", side)]).0, edge, "Side {side}");
+        }
+        // Not hiding: Always on top stays over windows; Normal and Always on bottom go under them.
+        assert_eq!(dock(&[("AutoHide", "0"), ("zOrderMode", "0")]), (Edge::Top, false, StayOut::OnTop));
+        assert_eq!(dock(&[("AutoHide", "0"), ("zOrderMode", "1")]), (Edge::Top, false, StayOut::BehindWindows));
+        assert_eq!(dock(&[("Side", "1"), ("AutoHide", "0"), ("zOrderMode", "2")]), (Edge::Bottom, false, StayOut::BehindWindows));
     }
 }

@@ -365,12 +365,14 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = dir.join("desktop-dock.exe");
     log(dir, &format!("installing {} from {}", shown(my_version()), me.display()));
+    let mut stopped = false;
     if !same_path(&me, &exe) {
         // Only one dock runs at a time: the one running now steps aside (in a test, nothing is
         // touched outside the test folder).
         if test_root().is_none() {
             close_settings_windows();
-            if system::dock_is_running() {
+            stopped = system::dock_is_running();
+            if stopped {
                 progress(Step::Close);
             }
             if !system::quit_running_dock() {
@@ -380,24 +382,37 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
                 log(dir, "the old dock was still running after 10 s; carrying on");
             }
         }
-        progress(Step::Copy);
-        // The old exe is renamed aside (allowed while it runs) and removed next time; the new one
-        // is written as fresh bytes, so it doesn't inherit a download's "from the internet" mark.
-        if exe.exists() {
-            let aside = dir.join(format!("desktop-dock.old-{}.exe", stamp()));
-            std::fs::rename(&exe, &aside).map_err(|e| format!("Couldn't move the old version aside: {}", system::plain(&e.to_string())))?;
+    }
+    let result = finish_install(options, dir, &me, &exe, progress);
+    // Whatever went wrong, the dock that was running doesn't stay closed: what's in place now
+    // starts (the old version, put back, or the new one if only a later step failed).
+    if let Err(e) = &result {
+        log(dir, &format!("failed: {e}"));
+        if stopped && exe.exists() {
+            match std::process::Command::new(&exe).current_dir(dir).spawn() {
+                Ok(_) => log(dir, "started the dock again"),
+                Err(e) => log(dir, &format!("couldn't start the dock again: {e}")),
+            }
         }
-        let bytes = std::fs::read(&me).map_err(|e| format!("Couldn't read {}: {}", me.display(), system::plain(&e.to_string())))?;
-        store::atomic_write_bytes(&exe, &bytes).map_err(|e| format!("Couldn't write {}: {}", exe.display(), system::plain(&e.to_string())))?;
+    }
+    result
+}
+
+/// The rest of an install, once the running dock (if any) has stepped aside.
+fn finish_install(options: Options, dir: &Path, me: &Path, exe: &Path, progress: &dyn Fn(Step)) -> Result<(), String> {
+    if !same_path(me, exe) {
+        progress(Step::Copy);
+        let bytes = std::fs::read(me).map_err(|e| format!("Couldn't read {}: {}", me.display(), system::plain(&e.to_string())))?;
+        put_in_place(dir, &bytes)?;
         log(dir, &format!("copied to {}", exe.display()));
     }
     progress(Step::StartMenu);
-    match create_shortcut(&exe, dir) {
+    match create_shortcut(exe, dir) {
         Ok(path) => log(dir, &format!("Start menu shortcut: {}", path.display())),
         Err(e) => log(dir, &format!("no Start menu shortcut: {e}")),
     }
     progress(Step::InstalledApps);
-    write_uninstall_entry(&exe, dir, bytes_of(&exe))?;
+    write_uninstall_entry(exe, dir, bytes_of(exe))?;
     log(dir, "Apps & features entry written");
     // That entry says where it is now; a dock an uninstall kept is either here again or not wanted.
     remember_kept_dock(None);
@@ -410,10 +425,51 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
     }
     if options.start {
         progress(Step::Start);
-        std::process::Command::new(&exe).current_dir(dir).spawn().map_err(|e| format!("Installed, but it didn't start: {}", system::plain(&e.to_string())))?;
+        std::process::Command::new(exe).current_dir(dir).spawn().map_err(|e| format!("Installed, but it didn't start: {}", system::plain(&e.to_string())))?;
         log(dir, "started");
     }
     Ok(())
+}
+
+/// Puts a new desktop-dock.exe in `dir`. It's written beside the old one first, as fresh bytes (so
+/// it doesn't inherit a download's "from the internet" mark); only then is the old one renamed
+/// aside (allowed while it runs; removed next time) and the new one put in its place. If anything
+/// fails, the old one stays or goes back: there's always a desktop-dock.exe that works.
+fn put_in_place(dir: &Path, bytes: &[u8]) -> Result<(), String> {
+    let exe = dir.join("desktop-dock.exe");
+    let fresh = dir.join("desktop-dock.exe.new");
+    store::atomic_write_bytes(&fresh, bytes).map_err(|e| format!("Couldn't write the new version: {}", system::plain(&e.to_string())))?;
+    let aside = dir.join(format!("desktop-dock.old-{}.exe", stamp()));
+    let had_one = exe.exists();
+    if had_one {
+        if let Err(e) = rename_soon(&exe, &aside) {
+            let _ = std::fs::remove_file(&fresh);
+            return Err(format!("Couldn't move the old version aside: {}", system::plain(&e.to_string())));
+        }
+    }
+    if let Err(e) = rename_soon(&fresh, &exe) {
+        if had_one {
+            let _ = rename_soon(&aside, &exe);
+        }
+        let _ = std::fs::remove_file(&fresh);
+        return Err(format!("Couldn't put the new version in place: {}", system::plain(&e.to_string())));
+    }
+    Ok(())
+}
+
+/// Renames a file, trying again for a few seconds if something has it open just now (an
+/// antivirus looking at a new program, a backup).
+fn rename_soon(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(_) if tries < 12 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            done => return done,
+        }
+    }
 }
 
 fn bytes_of(path: &Path) -> u64 {
@@ -503,7 +559,7 @@ pub fn uninstall(remove_dock: bool) -> Result<Option<PathBuf>, String> {
     }
     let _ = std::fs::remove_file(&exe);
     remove_old_copies(&dir);
-    for folder in ["cache", "logs"] {
+    for folder in ["cache", "logs", "updates"] {
         let _ = std::fs::remove_dir_all(dir.join(folder));
     }
     let _ = std::fs::remove_file(dir.join("setup.log"));
@@ -520,7 +576,17 @@ pub fn remove_old_copies(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name.starts_with("desktop-dock.old-") && name.ends_with(".exe") {
+        // (And a new version an update was interrupted in writing, whole or half-written.)
+        let new = name == "desktop-dock.exe.new" || (name.starts_with("desktop-dock.exe.new.") && name.ends_with(".tmp"));
+        if (name.starts_with("desktop-dock.old-") && name.ends_with(".exe")) || new {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    // A new version Update now downloaded, once it's running (see update::install).
+    let Ok(downloads) = std::fs::read_dir(dir.join("updates")) else { return };
+    for entry in downloads.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with("desktop-dock-") && (name.ends_with(".exe") || name.ends_with(".tmp")) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -667,10 +733,17 @@ fn install_failed(dialog: HWND, why: &str) {
 }
 
 /// What the Done page says: where the dock is, and how to bring it out.
-fn done_texts(updating: bool, startup: bool) -> (&'static str, String) {
+fn done_texts(updating: bool, startup: bool, edge: crate::config::Edge) -> (&'static str, String) {
+    use crate::config::Edge;
     let heading = if updating { "Desktop Dock is updated" } else { "Desktop Dock is installed" };
+    let side = match edge {
+        Edge::Top => "top",
+        Edge::Bottom => "bottom",
+        Edge::Left => "left",
+        Edge::Right => "right",
+    };
     let text = format!(
-        "Your dock is at the top of your screen: rest the pointer at the top edge to bring it out. It's in the Start menu too{}",
+        "Your dock is at the {side} of your screen: rest the pointer at the {side} edge to bring it out. It's in the Start menu too{}",
         if startup { ", and it starts with Windows." } else { "." }
     );
     (heading, text)
@@ -685,7 +758,10 @@ fn show_done(dialog: HWND) {
     for id in [IDC_WHERE_LABEL, IDC_WHERE, IDC_CHANGE, IDC_WHERE_NOTE, IDC_CHOICE, IDC_PROGRESS, IDCANCEL.0] {
         show(dialog, id, false);
     }
-    let (heading, text) = done_texts(updating, startup);
+    // (An update keeps your dock where it is: on the edge its dock.toml says.)
+    let dir = SETUP.with(|s| s.borrow().dir.clone());
+    let edge = dir.and_then(|dir| crate::config::load(&dir.join("dock.toml")).ok()).map_or(crate::config::Edge::Top, |parsed| parsed.config.dock.edge);
+    let (heading, text) = done_texts(updating, startup, edge);
     set_text(dialog, IDC_HEADING, heading);
     set_text(dialog, IDC_TEXT, &text);
     set_text(dialog, IDC_STATUS, "");
@@ -887,8 +963,13 @@ pub fn run_install(options: Options) -> i32 {
     match install(options, &dir, &|_| {}) {
         Ok(()) => 0,
         Err(e) => {
-            log(&dir, &format!("failed: {e}"));
-            if !options.quiet {
+            if options.quiet {
+                // (Update now runs this: Dock settings > About says what went wrong.)
+                let mut status = crate::update::Status::load(&dir);
+                status.error = format!("The update didn't install: {}", e.trim_end_matches('.'));
+                status.checked = crate::log::now_text();
+                status.save(&dir);
+            } else {
                 system::message_box(&e, "Desktop Dock setup", MB_ICONINFORMATION | MB_OK);
             }
             1
@@ -1033,12 +1114,43 @@ mod tests {
     }
 
     #[test]
+    fn a_new_version_goes_in_only_once_it_is_written_and_the_old_one_stays_if_not() {
+        let dir = std::env::temp_dir().join(format!("dd-setup-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("desktop-dock.exe");
+        let files = || {
+            let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        };
+        // A first install: just the exe.
+        put_in_place(&dir, b"one").unwrap();
+        assert_eq!((std::fs::read(&exe).unwrap(), files()), (b"one".to_vec(), vec!["desktop-dock.exe".to_string()]));
+        // An update: the new one in place, the old one aside (removed at the next start).
+        put_in_place(&dir, b"two").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"two");
+        assert!(files().iter().any(|name| name.starts_with("desktop-dock.old-")), "{:?}", files());
+        remove_old_copies(&dir);
+        assert_eq!(files(), vec!["desktop-dock.exe".to_string()]);
+        // The new one can't be written (here: its name is taken by a folder): the old one is
+        // untouched, still there and still the one that runs.
+        std::fs::create_dir(dir.join("desktop-dock.exe.new")).unwrap();
+        assert!(put_in_place(&dir, b"three").is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"two");
+        assert!(!files().iter().any(|name| name.starts_with("desktop-dock.old-")), "nothing moved aside: {:?}", files());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_done_page_says_where_the_dock_is() {
-        let (heading, text) = done_texts(false, true);
+        use crate::config::Edge;
+        let (heading, text) = done_texts(false, true, Edge::Top);
         assert_eq!(heading, "Desktop Dock is installed");
         assert!(text.contains("top of your screen") && text.ends_with("starts with Windows."));
-        assert_eq!(done_texts(true, false).0, "Desktop Dock is updated");
-        assert!(done_texts(true, false).1.ends_with("Start menu too."));
+        assert_eq!(done_texts(true, false, Edge::Top).0, "Desktop Dock is updated");
+        assert!(done_texts(true, false, Edge::Top).1.ends_with("Start menu too."));
+        assert!(done_texts(true, false, Edge::Left).1.starts_with("Your dock is at the left of your screen: rest the pointer at the left edge"));
     }
 
     #[test]

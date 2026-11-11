@@ -1,6 +1,7 @@
 //! Small questions the dock asks Windows: where the pointer is, which monitor to use,
 //! and whether a fullscreen app (game, video, presentation) is in front.
 
+use crate::config::Edge;
 use crate::{log_info, log_warn};
 use std::ffi::c_void;
 use windows::Win32::Foundation::{
@@ -814,78 +815,249 @@ pub fn locale_name() -> HSTRING {
     if len > 1 { HSTRING::from_wide(&name[..len as usize - 1]) } else { HSTRING::from("en-us") }
 }
 
-/// What to know about reaching the dock at the top of this screen (Settings > Screen).
-pub fn top_edge_note(screen: &Screen) -> Option<&'static str> {
-    if monitor_above(screen.monitor) {
-        return Some(
-            "Another screen sits right above this one, so the pointer slides past the top edge instead of stopping there: \
-             the dock is hard to bring out with the mouse. Choose another screen, or set a keyboard shortcut below.",
-        );
-    }
-    if auto_hide_bar_on_top(screen.monitor) {
-        return Some("The taskbar also hides along the top of this screen, so the two share the edge. A keyboard shortcut (below) brings out just the dock.");
-    }
-    if screen.work.top > screen.monitor.top {
-        return Some("The taskbar is at the top of this screen: push the pointer against the top edge as usual, and the dock comes out just below the taskbar.");
-    }
-    None
+/// What to know about reaching the dock on this edge of this screen (Settings > Screen), and
+/// whether Windows' taskbar is on that edge (then Settings > Screen offers its settings, where it
+/// can be moved).
+pub fn edge_note(screen: &Screen, edge: Edge) -> (Option<&'static str>, bool) {
+    let taskbar_hides = auto_hide_bar_on(screen.monitor, edge);
+    let taskbar_shown = !work_reaches_edge(screen, edge);
+    let note = if monitor_beyond(screen.monitor, edge) {
+        Some(match edge {
+            Edge::Top => "Another screen sits right above this one, so the pointer slides past the top edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
+            Edge::Bottom => "Another screen sits right below this one, so the pointer slides past the bottom edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
+            Edge::Left => "Another screen sits right beside this one on the left, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
+            Edge::Right => "Another screen sits right beside this one on the right, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
+        })
+    } else if taskbar_hides {
+        Some("The taskbar also hides along this edge, so the two come out together. To give the dock the edge to itself, move the taskbar (Taskbar settings), or use a keyboard shortcut (below) to bring out just the dock.")
+    } else if taskbar_shown {
+        Some("The taskbar is on this edge: the dock sits beside it, and pushing the pointer against the screen's edge (across the taskbar) brings it out. To give the dock the edge to itself, move the taskbar (Taskbar settings).")
+    } else {
+        None
+    };
+    (note, taskbar_hides || taskbar_shown)
 }
 
-/// A taskbar (or other bar) that hides itself along this screen's top edge.
-fn auto_hide_bar_on_top(monitor: RECT) -> bool {
-    use windows::Win32::UI::Shell::{ABE_TOP, ABM_GETAUTOHIDEBAREX, APPBARDATA, SHAppBarMessage};
-    let mut data = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, uEdge: ABE_TOP, rc: monitor, ..Default::default() };
+/// The screen's work area reaches its own `edge`: no taskbar or other bar is shown on it.
+pub fn work_reaches_edge(screen: &Screen, edge: Edge) -> bool {
+    let (monitor, work) = (screen.monitor, screen.work);
+    match edge {
+        Edge::Top => work.top <= monitor.top,
+        Edge::Bottom => work.bottom >= monitor.bottom,
+        Edge::Left => work.left <= monitor.left,
+        Edge::Right => work.right >= monitor.right,
+    }
+}
+
+/// A taskbar (or other bar) that hides itself along this screen's `edge`.
+fn auto_hide_bar_on(monitor: RECT, edge: Edge) -> bool {
+    use windows::Win32::UI::Shell::{ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX, APPBARDATA, SHAppBarMessage};
+    let side = match edge {
+        Edge::Top => ABE_TOP,
+        Edge::Bottom => ABE_BOTTOM,
+        Edge::Left => ABE_LEFT,
+        Edge::Right => ABE_RIGHT,
+    };
+    let mut data = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, uEdge: side, rc: monitor, ..Default::default() };
     unsafe { SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut data) != 0 }
 }
 
-/// True if another monitor touches this one's top edge (anywhere along it).
-pub fn monitor_above(monitor: RECT) -> bool {
-    let width = monitor.right - monitor.left;
+/// True if another monitor touches this one's `edge` (anywhere along it): the pointer slides past
+/// that edge instead of stopping there.
+pub fn monitor_beyond(monitor: RECT, edge: Edge) -> bool {
+    let (width, height) = (monitor.right - monitor.left, monitor.bottom - monitor.top);
     (1..8).any(|i| unsafe {
-        let x = monitor.left + width * i / 8;
-        !MonitorFromPoint(POINT { x, y: monitor.top - 1 }, MONITOR_DEFAULTTONULL).is_invalid()
+        let point = match edge {
+            Edge::Top => POINT { x: monitor.left + width * i / 8, y: monitor.top - 1 },
+            Edge::Bottom => POINT { x: monitor.left + width * i / 8, y: monitor.bottom },
+            Edge::Left => POINT { x: monitor.left - 1, y: monitor.top + height * i / 8 },
+            Edge::Right => POINT { x: monitor.right, y: monitor.top + height * i / 8 },
+        };
+        !MonitorFromPoint(point, MONITOR_DEFAULTTONULL).is_invalid()
     })
+}
+
+/// What Windows' own signal (`SHQueryUserNotificationState`) says, as far as the dock cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    /// Nothing that matters here.
+    Quiet,
+    /// "A full-screen program is running." Windows also says this when another program keeps an
+    /// invisible, click-through window over the whole screen (overlays often do) and the desktop
+    /// or the taskbar is in front, so on its own it decides nothing: it only confirms a maximized
+    /// window that covers the screen.
+    Busy,
+    /// An exclusive-fullscreen game.
+    Game,
+    /// Presentation mode, which the user turns on.
+    Presentation,
+}
+
+/// A window, as far as the fullscreen check cares.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Win {
+    /// The desktop or a taskbar.
+    shell: bool,
+    /// Visible, and not cloaked by Windows (as the lock screen's window can be, left in front
+    /// after unlocking).
+    seen: bool,
+    /// Clicks go through it to whatever is underneath (`WS_EX_TRANSPARENT`).
+    click_through: bool,
+    /// It covers the dock's whole screen.
+    covers: bool,
+    /// Maximized.
+    zoomed: bool,
+}
+
+/// Why the dock stays out of the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fullscreen {
+    Presentation,
+    Game,
+    /// A window over the whole screen: the one in front (`shown: None`) or the one Windows found
+    /// at a spot on the screen (`Some(i)`); `confirmed` when it's maximized and Windows' signal is
+    /// what says it's full-screen.
+    Window { shown: Option<usize>, confirmed: bool },
+}
+
+/// The rules, from Windows' signal, the window in front (`None`: Windows says there's none) and
+/// the windows showing at a few spots on the dock's screen. Those are found the way Windows finds
+/// what a click lands on, so an overlay the pointer clicks through, or a fully see-through part
+/// of one, is never among them; a full-screen window showing on the dock's screen is, even when
+/// it isn't the one in front (a video on this screen while you work on another).
+fn fullscreen_verdict(signal: Signal, front: Option<Win>, shown: &[Win]) -> Option<Fullscreen> {
+    if signal == Signal::Presentation {
+        return Some(Fullscreen::Presentation);
+    }
+    // The desktop or the taskbar in front: no full-screen game is, whatever Windows says.
+    if signal == Signal::Game && !front.is_some_and(|front| front.shell) {
+        return Some(Fullscreen::Game);
+    }
+    let full = |window: &Win| {
+        // The desktop, a taskbar, a window nobody can see or one the pointer clicks through
+        // isn't in the way.
+        if window.shell || !window.seen || window.click_through || !window.covers {
+            return None;
+        }
+        // A maximized window also covers the screen when the taskbar hides itself; that's not
+        // full-screen unless Windows says so too.
+        if !window.zoomed { Some(false) } else { (signal == Signal::Busy).then_some(true) }
+    };
+    if let Some(confirmed) = front.as_ref().and_then(full) {
+        return Some(Fullscreen::Window { shown: None, confirmed });
+    }
+    shown.iter().enumerate().find_map(|(i, window)| full(window).map(|confirmed| Fullscreen::Window { shown: Some(i), confirmed }))
 }
 
 /// What fullscreen game, video or presentation is in front on this monitor, if any, in words
 /// for the log. Windows' own signal catches exclusive fullscreen; the rectangle check catches
-/// borderless-window games and fullscreen video, which the signal can miss. A window nobody can
-/// see doesn't count: hidden, or cloaked by Windows (as the lock screen's window can be, left in
-/// front after unlocking).
+/// borderless-window games and fullscreen video, which the signal can miss. The rules are in
+/// `fullscreen_verdict`.
 pub fn fullscreen_in_front(monitor: RECT) -> Option<String> {
+    let signal = match unsafe { SHQueryUserNotificationState() } {
+        Ok(state) if state == QUNS_RUNNING_D3D_FULL_SCREEN => Signal::Game,
+        Ok(state) if state == QUNS_PRESENTATION_MODE => Signal::Presentation,
+        Ok(state) if state == QUNS_BUSY => Signal::Busy,
+        _ => Signal::Quiet,
+    };
+    let in_front = unsafe { GetForegroundWindow() };
+    let front = (!in_front.is_invalid()).then(|| describe_window(in_front, monitor));
+    let showing: Vec<HWND> = windows_showing(monitor).into_iter().filter(|&window| window != in_front).collect();
+    let shown: Vec<Win> = showing.iter().map(|&window| describe_window(window, monitor)).collect();
+    Some(match fullscreen_verdict(signal, front, &shown)? {
+        Fullscreen::Presentation => "a presentation".into(),
+        Fullscreen::Game => "a fullscreen game".into(),
+        Fullscreen::Window { shown, confirmed } => {
+            let window = shown.map_or(in_front, |i| showing[i]);
+            let place = if shown.is_some() { ", not the active one" } else { "" };
+            let also = if confirmed { "; Windows says so too" } else { "" };
+            format!("a fullscreen window ({} of {}{place}{also})", class_name(window), process_name(window))
+        }
+    })
+}
+
+/// The top-level window a click at `point` would land on is `window` (as Windows finds it: not
+/// where another window covers it, nor where it's see-through).
+pub fn window_under(point: POINT, window: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint};
+    unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) == window }
+}
+
+/// The top-level windows showing at three spots in the lower half of this monitor (away from
+/// the dock and its pop-ups), found as Windows finds what a click there would land on; none of
+/// the dock's own.
+fn windows_showing(monitor: RECT) -> Vec<HWND> {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, GetWindowThreadProcessId, WindowFromPoint};
+    let (width, height) = (monitor.right - monitor.left, monitor.bottom - monitor.top);
+    let spots = [
+        POINT { x: monitor.left + width / 4, y: monitor.top + height * 3 / 4 },
+        POINT { x: monitor.left + width / 2, y: monitor.bottom - 2 },
+        POINT { x: monitor.left + width * 3 / 4, y: monitor.top + height * 3 / 4 },
+    ];
+    let mut found: Vec<HWND> = Vec::with_capacity(spots.len());
     unsafe {
-        if let Ok(state) = SHQueryUserNotificationState() {
-            if state == QUNS_RUNNING_D3D_FULL_SCREEN {
-                return Some("a fullscreen game".into());
+        let me = GetCurrentProcessId();
+        for spot in spots {
+            let window = GetAncestor(WindowFromPoint(spot), GA_ROOT);
+            if window.is_invalid() || found.contains(&window) {
+                continue;
             }
-            if state == QUNS_PRESENTATION_MODE {
-                return Some("a presentation".into());
-            }
-            if state == QUNS_BUSY {
-                return Some("a fullscreen program (Windows says)".into());
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(window, Some(&mut pid));
+            if pid != me {
+                found.push(window);
             }
         }
-        let window = GetForegroundWindow();
-        if window.is_invalid() || !IsWindowVisible(window).as_bool() || cloaked(window) {
-            return None;
-        }
-        let mut class = [0u16; 64];
-        let len = GetClassNameW(window, &mut class).max(0) as usize;
-        let class = String::from_utf16_lossy(&class[..len]);
-        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-            return None;
-        }
+    }
+    found
+}
+
+/// A window, described for `fullscreen_verdict`.
+fn describe_window(window: HWND, monitor: RECT) -> Win {
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongW, WS_EX_TRANSPARENT};
+    unsafe {
         let mut rect = RECT::default();
-        if GetWindowRect(window, &mut rect).is_err() {
-            return None;
-        }
-        let covers = rect.left <= monitor.left
+        let covers = GetWindowRect(window, &mut rect).is_ok()
+            && rect.left <= monitor.left
             && rect.top <= monitor.top
             && rect.right >= monitor.right
             && rect.bottom >= monitor.bottom;
-        // A maximized window can also cover the monitor when the taskbar auto-hides;
-        // that's not fullscreen.
-        (covers && !IsZoomed(window).as_bool()).then(|| format!("a fullscreen window ({class})"))
+        Win {
+            shell: matches!(class_name(window).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"),
+            seen: IsWindowVisible(window).as_bool() && !cloaked(window),
+            click_through: GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 != 0,
+            covers,
+            zoomed: IsZoomed(window).as_bool(),
+        }
+    }
+}
+
+fn class_name(window: HWND) -> String {
+    let mut class = [0u16; 64];
+    let len = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
+    String::from_utf16_lossy(&class[..len])
+}
+
+/// The file name of the program a window belongs to ("vlc.exe"), or "?" if Windows won't say.
+fn process_name(window: HWND) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return "?".into();
+        };
+        let mut path = [0u16; 1024];
+        let mut len = path.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(path.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(process);
+        if !ok {
+            return "?".into();
+        }
+        let path = String::from_utf16_lossy(&path[..len as usize]);
+        path.rsplit('\\').next().filter(|name| !name.is_empty()).unwrap_or("?").to_string()
     }
 }
 
@@ -909,6 +1081,75 @@ mod tests {
         assert_eq!(plain("Couldn't open it: Access is denied. (0x80070005)."), "Couldn't open it: Access is denied.");
         assert_eq!(plain("Icon size (in pixels) stays (os error x) as is"), "Icon size (in pixels) stays (os error x) as is");
         assert_eq!(plain("unclosed (os error 5"), "unclosed (os error 5");
+    }
+
+    // A window for the fullscreen rules: an ordinary one unless changed.
+    fn win() -> Win {
+        Win { shell: false, seen: true, click_through: false, covers: false, zoomed: false }
+    }
+    fn desktop() -> Win {
+        Win { shell: true, covers: true, ..win() }
+    }
+    fn taskbar() -> Win {
+        Win { shell: true, ..win() }
+    }
+
+    #[test]
+    fn over_the_desktop_or_the_taskbar_nothing_is_fullscreen_whatever_windows_signals() {
+        // An invisible, click-through window over the whole screen (as overlays keep open) makes
+        // Windows signal "busy" whenever the desktop or the taskbar is in front. Finding what a
+        // click would land on passes through it, so the spots show the desktop, the taskbar or
+        // ordinary windows.
+        for signal in [Signal::Quiet, Signal::Busy, Signal::Game] {
+            assert_eq!(fullscreen_verdict(signal, Some(desktop()), &[desktop(), taskbar()]), None, "desktop, {signal:?}");
+            assert_eq!(fullscreen_verdict(signal, Some(taskbar()), &[win(), taskbar(), desktop()]), None, "taskbar, {signal:?}");
+        }
+    }
+
+    #[test]
+    fn windows_busy_signal_only_confirms_a_maximized_window_that_covers_the_screen() {
+        // An always-on-top overlay makes Windows signal "busy" over ordinary windows too.
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(win()), &[win(), taskbar()]), None, "an ordinary window in front");
+        assert_eq!(fullscreen_verdict(Signal::Busy, None, &[desktop()]), None, "no window in front");
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(Win { covers: true, seen: false, ..win() }), &[]), None, "one nobody can see");
+        // A maximized window covering the screen (the taskbar hides itself): only with the signal.
+        let maximized = Win { covers: true, zoomed: true, ..win() };
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(maximized), &[maximized]), None, "maximized, no signal");
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(maximized), &[]), Some(Fullscreen::Window { shown: None, confirmed: true }), "maximized, Windows says busy");
+    }
+
+    #[test]
+    fn a_window_over_the_whole_screen_is_fullscreen_unless_clicks_go_through_it() {
+        let cover = Win { covers: true, ..win() };
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(cover), &[]), Some(Fullscreen::Window { shown: None, confirmed: false }), "a borderless video or game");
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(cover), &[]), Some(Fullscreen::Window { shown: None, confirmed: false }));
+        let overlay = Win { covers: true, click_through: true, ..cover };
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(overlay), &[desktop()]), None, "an overlay in front");
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(overlay), &[overlay, win()]), None, "an overlay, Windows says busy");
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(Win { covers: true, seen: false, ..win() }), &[]), None, "hidden or cloaked");
+    }
+
+    #[test]
+    fn a_fullscreen_window_showing_on_the_screen_counts_though_another_is_in_front() {
+        // A video on this screen while you work on another, one kept on top, or one Windows
+        // wouldn't let come to the front: found at the spots on the screen.
+        let full = Win { covers: true, ..win() };
+        let maximized = Win { zoomed: true, ..full };
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(desktop()), &[full]), Some(Fullscreen::Window { shown: Some(0), confirmed: false }));
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(win()), &[win(), full]), Some(Fullscreen::Window { shown: Some(1), confirmed: false }));
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(desktop()), &[taskbar(), maximized]), Some(Fullscreen::Window { shown: Some(1), confirmed: true }));
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(win()), &[maximized]), None, "maximized, no signal");
+        assert_eq!(fullscreen_verdict(Signal::Busy, Some(win()), &[win(), taskbar()]), None, "nothing covering shows");
+    }
+
+    #[test]
+    fn exclusive_games_and_presentation_mode_keep_the_dock_away() {
+        assert_eq!(fullscreen_verdict(Signal::Game, Some(win()), &[]), Some(Fullscreen::Game));
+        assert_eq!(fullscreen_verdict(Signal::Game, None, &[]), Some(Fullscreen::Game), "no window in front");
+        // Presentation mode is the user's own setting: it holds even over the desktop.
+        assert_eq!(fullscreen_verdict(Signal::Presentation, Some(desktop()), &[desktop()]), Some(Fullscreen::Presentation));
+        assert_eq!(fullscreen_verdict(Signal::Presentation, None, &[]), Some(Fullscreen::Presentation));
+        assert_eq!(fullscreen_verdict(Signal::Quiet, Some(win()), &[win()]), None, "an ordinary window, nothing signalled");
     }
 
     fn screen(id: &str, main: bool, left: i32) -> Screen {

@@ -18,15 +18,21 @@ hide_delay_ms = 250
 slide_in_ms = 250
 slide_out_ms = 250
 show_labels = true
+always_show_labels = false # true: every icon's name all the time, not only the one you point at ("…" cuts long ones short)
 label_size = 12.5          # name text size, logical pixels (8-24)
 background_opacity = 100   # how solid the panel, its edge and shadow are, in % (0 = icons only)
 icon_opacity = 100         # how solid icons are, in % (10-100); the one under the pointer is always solid
 launch_effect = "bounce"   # or "none", or "glow" (the clicked icon glows up for a moment)
-look = "light"             # the panel: "light" (CrystalXP-style) or "dark"
+style = "classic"          # the panel: "classic" (the look below), "glass", "frosted" or "capsule" (floats below the edge; light or dark with Windows)
+look = "light"             # the classic panel: "light" (CrystalXP-style) or "dark"
 hover_glow = "none"        # a glow behind the icon you point at: "none", "accent" (Windows' accent colour) or "icon" (each icon's own colour)
 monitor = "main"           # the screen the dock is on: "main" (Windows' main screen), or a screen's id from Settings > Screen; one that isn't plugged in gives the main screen
 hotkey = ""                # a keyboard shortcut that brings the dock out (and sends it back), like "Ctrl+Shift+D": Ctrl and/or Alt, Shift if you like, and one key; "" for none (the default)
 locked = false             # true: no dragging icons around, off, or onto the dock (right-click > Lock icons)
+edge = "top"               # the screen edge it's on: "top", "bottom", "left" or "right" (beside a taskbar on that edge, never over it)
+auto_hide = true           # false: the dock stays out when you're not using it (right-click > Hide automatically)
+stay_out = "behind-windows" # how it stays out: "behind-windows" (windows cover it; rest the pointer at the edge to bring it over them) or "on-top"
+check_updates = false      # true: ask GitHub once a day whether there's a newer version (Dock settings > About)
 
 [[item]]
 name = "Chrome"
@@ -84,6 +90,7 @@ kind = "recycle-bin"       # uses Windows' own empty/full icons
 ## Rules when reading
 - **Unknown keys** (typos, future settings): logged as warnings with line numbers, kept in the file, otherwise ignored.
 - **Out-of-range values:** clamped, with a warning.
+- **A `style`, `look`, `edge` or `stay_out` the dock doesn't know** (a typo, or one from a newer version): the default (`classic`, `light`, `top`, `behind-windows`), with a warning, so the file still loads.
 - **A file from a newer version** (`version` higher than the dock knows): the dock runs from it read-only and never saves over it. This protects your settings if you roll back to an older dock.
 - **A file that can't be read:** the dock runs from `backups\last-good.toml` and shows a notice. The broken file is never overwritten: fix it and save, or restore a version in Dock settings > Versions.
 

@@ -294,7 +294,8 @@ fn look_override() -> Option<bool> {
     crate::home::is_dev_build().then(|| look.eq_ignore_ascii_case("dark"))
 }
 
-fn windows_is_dark() -> bool {
+/// Windows' apps are set to dark (Settings > Personalisation > Colours), and High Contrast is off.
+pub(crate) fn windows_is_dark() -> bool {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     let mut light = 1u32;
     let mut size = 4u32;

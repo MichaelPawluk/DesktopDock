@@ -1,7 +1,7 @@
 //! Dock geometry. Pure arithmetic with no Windows calls, so it can be unit-tested.
 //! Sizes are physical pixels; window coordinates start at the dock window's top-left corner.
 
-use crate::config::DockSettings;
+use crate::config::{DockSettings, Edge};
 use crate::motion::ease_out;
 
 /// A horizontal slot on the dock: an icon (icon width + gap) or a separator.
@@ -24,7 +24,10 @@ pub struct Geometry {
     pub origin: f32,
     pub panel_left: f32,
     pub panel_w: f32,
+    /// How far the panel reaches from the screen edge (its bottom).
     pub panel_h: f32,
+    /// Where a floating panel starts below the screen edge; 0 for one hanging from it.
+    pub panel_top: f32,
     pub radius: f32,
     pub shadow: f32,
     pub label_h: f32,
@@ -32,8 +35,27 @@ pub struct Geometry {
     /// The "Removed X · Undo" strip under the panel: its top and height.
     pub strip_top: f32,
     pub strip_h: f32,
+    /// The window's size along the edge and across it (its width and height on the top edge).
     pub win_w: i32,
     pub win_h: i32,
+    /// The edge the dock is on (everything above is as if on the top edge: see `Frame`).
+    pub edge: Edge,
+    /// On a side, how far a name beside an icon may reach (cut short beyond); 0 on top or bottom.
+    pub label_w: f32,
+    /// On a side, how wide the strip beside the panel may be; 0 on top or bottom.
+    pub strip_w: f32,
+}
+
+impl Geometry {
+    /// From the dock's own directions to the window's (see `Frame`).
+    pub fn frame(&self) -> Frame {
+        Frame { edge: self.edge, across: self.win_h as f32 }
+    }
+
+    /// The window's width and height on the screen.
+    pub fn window_size(&self) -> (i32, i32) {
+        self.frame().window_size(self.win_w, self.win_h)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,6 +104,11 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
             }
         }
     }
+    // A floating panel (the capsule) starts a little below the screen edge: everything on it moves
+    // down by that much, and the window reaches that much further.
+    let skin = crate::skin::skin(settings.style, settings.look, false);
+    let panel_top = px(skin.float);
+    pad_top += panel_top;
     let hover_icon = px(settings.zoom_size).max(icon);
     let shadow = px(13.0);
     let label_h = if settings.show_labels { px(24.0 * settings.label_size / 12.5).round() } else { 0.0 };
@@ -96,9 +123,19 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
     }
     let panel_w = (2.0 * pad_x - gap + x).max(2.0 * pad_x);
     let panel_h = pad_top + icon + pad_bottom;
-    let margin_x = shadow.max(px(70.0)); // room for labels at the ends
-    let (strip_top, strip_h) = (panel_h + px(6.0), px(28.0));
-    let below = ((hover_icon - icon - pad_bottom).max(0.0) + bounce + label_h + shadow).max(strip_top + strip_h + shadow - panel_h);
+    let side = settings.edge.is_side();
+    // On top or bottom, names go under the icons (room at the ends for the outer ones' names);
+    // on a side, beside them, cut short beyond `label_w`, and the strip goes beside the panel.
+    let margin_x = shadow.max(px(70.0));
+    let (label_w, strip_w) = if side { (px(160.0), px(300.0)) } else { (0.0, 0.0) };
+    // The strip goes past every icon's name when those always show.
+    let names = if settings.show_labels && settings.always_show_labels { if side { px(8.0) + label_w } else { label_h } } else { 0.0 };
+    let (strip_top, strip_h) = (panel_h + px(6.0) + names, px(28.0));
+    let below = if side {
+        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + px(8.0) + label_w + shadow).max(strip_top + strip_w + shadow - panel_h)
+    } else {
+        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + label_h + shadow).max(strip_top + strip_h + shadow - panel_h)
+    };
 
     let geo = Geometry {
         scale,
@@ -110,7 +147,9 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
         panel_left: margin_x,
         panel_w,
         panel_h,
-        radius: px(7.0),
+        panel_top,
+        // Round ends: half the panel's own height.
+        radius: skin.radius.map_or(((panel_h - panel_top) / 2.0).floor(), px),
         shadow,
         label_h,
         bounce,
@@ -118,6 +157,9 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
         strip_h,
         win_w: (panel_w + 2.0 * margin_x) as i32,
         win_h: (panel_h + below).ceil() as i32,
+        edge: settings.edge,
+        label_w,
+        strip_w,
     };
     Layout { geo, slots }
 }
@@ -130,6 +172,9 @@ impl Geometry {
 
     /// How far everything moves up to slide completely out of view.
     pub fn travel(&self) -> f32 {
+        if self.edge.is_side() {
+            return self.win_h as f32; // names and the strip beside the panel: the whole depth
+        }
         (self.panel_h + self.shadow + self.label_h + self.bounce + self.hover_icon).max(self.strip_top + self.strip_h + self.shadow)
     }
 
@@ -150,9 +195,10 @@ impl Slot {
 }
 
 impl Layout {
-    /// Window x that centres the dock on a monitor.
-    pub fn window_x(&self, monitor_left: i32, monitor_right: i32) -> i32 {
-        monitor_left + ((monitor_right - monitor_left) - self.geo.win_w) / 2
+    /// Where the window starts along the edge, to centre the dock between `from` and `to` (a
+    /// screen's left and right, or its top and bottom on a side).
+    pub fn window_x(&self, from: i32, to: i32) -> i32 {
+        from + ((to - from) - self.geo.win_w) / 2
     }
 
     /// The icon under a point in window coordinates. Separators and empty space give None.
@@ -266,36 +312,124 @@ impl Layout {
         y > g.panel_h + g.icon * 0.6 || x < g.panel_left - g.icon || x > g.panel_left + g.panel_w + g.icon
     }
 
-    /// The panel's left and right edges in screen pixels, for a window at `win_x`.
-    fn panel_span(&self, win_x: i32) -> (i32, i32) {
-        let left = win_x + self.geo.panel_left as i32;
-        (left, left + self.geo.panel_w as i32)
+    /// The panel's start and end along the edge, from the window's start.
+    fn panel_span(&self) -> (i32, i32) {
+        let start = self.geo.panel_left as i32;
+        (start, start + self.geo.panel_w as i32)
     }
 
-    // The screen's edge and the dock's top differ when a taskbar sits at the top: the dock hangs
-    // below it (`dock_top`), and the pointer still finds it by pushing against the screen's
-    // real top edge (`edge`), across the taskbar. Without one they're the same.
+    // The screen's edge and the dock's own edge differ when a taskbar sits on that edge: the dock
+    // sits beside it, and the pointer still finds it by pushing against the screen's real edge,
+    // across the taskbar. Without one they're the same.
 
-    /// Pointer pressed against the screen edge within the dock's width: starts the reveal. Only
-    /// on the dock's own screen: a pointer on a screen above (smaller y) doesn't count.
-    pub fn at_reveal_edge(&self, win_x: i32, edge: i32, x: i32, y: i32) -> bool {
-        let (left, right) = self.panel_span(win_x);
-        y >= edge && y <= edge + 1 && x >= left && x < right
+    /// Pointer pressed against the screen edge within the dock's span: starts the reveal. Only
+    /// on the dock's own screen: a pointer on a screen beyond that edge doesn't count.
+    pub fn at_reveal_edge(&self, place: &Place, x: i32, y: i32) -> bool {
+        let (start, end) = self.panel_span();
+        let (along, away, _) = place.locate(x, y);
+        (0..=1).contains(&away) && along >= start && along < end
     }
 
     /// Pointer close to where the dock appears, so it's worth checking more often (on the
     /// dock's screen only).
-    pub fn near_edge(&self, win_x: i32, edge: i32, dock_top: i32, x: i32, y: i32) -> bool {
-        let (left, right) = self.panel_span(win_x);
-        y >= edge && y <= dock_top + self.geo.panel_h as i32 && x >= left - 64 && x < right + 64
+    pub fn near_edge(&self, place: &Place, x: i32, y: i32) -> bool {
+        let (start, end) = self.panel_span();
+        let (along, away, from_dock) = place.locate(x, y);
+        away >= 0 && from_dock <= self.geo.panel_h as i32 && along >= start - 64 && along < end + 64
     }
 
-    /// Pointer over the shown dock (or over a top taskbar above it, on the way down), with a
-    /// few pixels' grace.
-    pub fn pointer_over(&self, win_x: i32, edge: i32, dock_top: i32, x: i32, y: i32) -> bool {
-        let (left, right) = self.panel_span(win_x);
-        let bottom = dock_top + self.geo.reach() as i32 + 4;
-        x >= left - 4 && x < right + 4 && y >= edge && y <= bottom
+    /// Pointer over the shown dock (or over a taskbar beside it, on the way there), with a few
+    /// pixels' grace.
+    pub fn pointer_over(&self, place: &Place, x: i32, y: i32) -> bool {
+        let (start, end) = self.panel_span();
+        let (along, away, from_dock) = place.locate(x, y);
+        along >= start - 4 && along < end + 4 && away >= 0 && from_dock <= self.geo.reach() as i32 + 4
+    }
+}
+
+/// The dock's own directions, and the window's. Everything is laid out as if on the top edge:
+/// `u` along the edge (left to right; top to bottom on a side), `v` away from it. `Frame` turns
+/// that into the window's x and y for the edge the dock is on. Rectangles are mapped, never the
+/// drawing itself, so icons and text are always upright.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub edge: Edge,
+    /// The window's size across the edge (its height on top or bottom, its width on a side).
+    pub across: f32,
+}
+
+impl Frame {
+    /// A rectangle in the dock's directions (`u0..u1` along, `v0..v1` away), in the window:
+    /// (left, top, right, bottom).
+    pub fn rect(&self, u0: f32, v0: f32, u1: f32, v1: f32) -> (f32, f32, f32, f32) {
+        match self.edge {
+            Edge::Top => (u0, v0, u1, v1),
+            Edge::Bottom => (u0, self.across - v1, u1, self.across - v0),
+            Edge::Left => (v0, u0, v1, u1),
+            Edge::Right => (self.across - v1, u0, self.across - v0, u1),
+        }
+    }
+
+    /// A point in the window (x, y) in the dock's directions (u, v).
+    pub fn from_window(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.edge {
+            Edge::Top => (x, y),
+            Edge::Bottom => (x, self.across - y),
+            Edge::Left => (y, x),
+            Edge::Right => (y, self.across - x),
+        }
+    }
+
+    /// A shift away from the edge (`v`), as a shift in the window (x, y).
+    pub fn shift(&self, v: f32) -> (f32, f32) {
+        match self.edge {
+            Edge::Top => (0.0, v),
+            Edge::Bottom => (0.0, -v),
+            Edge::Left => (v, 0.0),
+            Edge::Right => (-v, 0.0),
+        }
+    }
+
+    /// The window's width and height for a dock `along` long and `across` deep.
+    pub fn window_size(&self, along: i32, across: i32) -> (i32, i32) {
+        if self.edge.is_side() { (across, along) } else { (along, across) }
+    }
+}
+
+/// Where the dock is on the screen, for the pointer: screen points in the dock's directions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub edge: Edge,
+    /// Where the dock's window starts along the edge (screen x on top or bottom, y on a side).
+    pub start: i32,
+    /// The screen's own edge: its first pixel row or column on that side (the last, on the
+    /// bottom or right), where the pointer stops.
+    pub screen_edge: i32,
+    /// Where the dock itself starts: inside a taskbar on that edge, the work area's edge; else the
+    /// screen's.
+    pub dock_edge: i32,
+}
+
+impl Place {
+    /// A screen point as (along the dock, from its window's start; away from the screen's edge;
+    /// away from the dock's own edge). Negative away: past the edge, on another screen.
+    pub fn locate(&self, x: i32, y: i32) -> (i32, i32, i32) {
+        match self.edge {
+            Edge::Top => (x - self.start, y - self.screen_edge, y - self.dock_edge),
+            Edge::Bottom => (x - self.start, self.screen_edge - y, self.dock_edge - y),
+            Edge::Left => (y - self.start, x - self.screen_edge, x - self.dock_edge),
+            Edge::Right => (y - self.start, self.screen_edge - x, self.dock_edge - x),
+        }
+    }
+
+    /// The screen point `along` the dock and `away` from the screen's edge.
+    pub fn point(&self, along: i32, away: i32) -> (i32, i32) {
+        match self.edge {
+            Edge::Top => (self.start + along, self.screen_edge + away),
+            Edge::Bottom => (self.start + along, self.screen_edge - away),
+            Edge::Left => (self.screen_edge + away, self.start + along),
+            Edge::Right => (self.screen_edge - away, self.start + along),
+        }
     }
 }
 
@@ -413,20 +547,26 @@ mod tests {
         items
     }
 
+    /// On the top edge: the window starting at `start`, the screen's top at `screen_edge`, the dock's at `dock_edge`.
+    fn top(start: i32, screen_edge: i32, dock_edge: i32) -> Place {
+        Place { edge: Edge::Top, start, screen_edge, dock_edge }
+    }
+
     #[test]
     fn a_pointer_on_a_screen_above_never_reveals_the_dock() {
         let layout = compute(&settings(), &small_dock(), 96, None);
         let win_x = 100;
         let middle = win_x + (layout.geo.panel_left + layout.geo.panel_w / 2.0) as i32;
         // The dock's screen starts at y = 0 with another screen above it (negative y).
-        assert!(layout.at_reveal_edge(win_x, 0, middle, 0), "pressed against the edge");
-        assert!(!layout.at_reveal_edge(win_x, 0, middle, -1), "just over on the screen above");
-        assert!(!layout.at_reveal_edge(win_x, 0, middle, -500), "anywhere on the screen above");
-        assert!(!layout.near_edge(win_x, 0, 0, middle, -20), "not even worth checking quickly");
-        assert!(!layout.pointer_over(win_x, 0, 0, middle, -5), "and doesn't keep the dock out");
+        let place = top(win_x, 0, 0);
+        assert!(layout.at_reveal_edge(&place, middle, 0), "pressed against the edge");
+        assert!(!layout.at_reveal_edge(&place, middle, -1), "just over on the screen above");
+        assert!(!layout.at_reveal_edge(&place, middle, -500), "anywhere on the screen above");
+        assert!(!layout.near_edge(&place, middle, -20), "not even worth checking quickly");
+        assert!(!layout.pointer_over(&place, middle, -5), "and doesn't keep the dock out");
         // A dock on a lower screen (top at y = 1440) behaves the same.
-        assert!(layout.at_reveal_edge(win_x, 1440, middle, 1440));
-        assert!(!layout.at_reveal_edge(win_x, 1440, middle, 1439));
+        assert!(layout.at_reveal_edge(&top(win_x, 1440, 1440), middle, 1440));
+        assert!(!layout.at_reveal_edge(&top(win_x, 1440, 1440), middle, 1439));
     }
 
     #[test]
@@ -435,13 +575,57 @@ mod tests {
         let win_x = 100;
         let middle = win_x + (layout.geo.panel_left + layout.geo.panel_w / 2.0) as i32;
         // A 48 px taskbar at the top: the dock hangs from y = 48, the screen's edge is y = 0.
-        let (edge, dock_top) = (0, 48);
-        assert!(layout.at_reveal_edge(win_x, edge, middle, 0), "pushing against the screen's top, over the taskbar");
-        assert!(!layout.at_reveal_edge(win_x, edge, middle, dock_top), "the line under the taskbar isn't the edge");
-        assert!(layout.near_edge(win_x, edge, dock_top, middle, 20));
-        assert!(layout.pointer_over(win_x, edge, dock_top, middle, 20), "on the way down across the taskbar it stays out");
-        assert!(layout.pointer_over(win_x, edge, dock_top, middle, dock_top + layout.geo.reach() as i32));
-        assert!(!layout.pointer_over(win_x, edge, dock_top, middle, dock_top + layout.geo.reach() as i32 + 50));
+        let dock_top = 48;
+        let place = top(win_x, 0, dock_top);
+        assert!(layout.at_reveal_edge(&place, middle, 0), "pushing against the screen's top, over the taskbar");
+        assert!(!layout.at_reveal_edge(&place, middle, dock_top), "the line under the taskbar isn't the edge");
+        assert!(layout.near_edge(&place, middle, 20));
+        assert!(layout.pointer_over(&place, middle, 20), "on the way down across the taskbar it stays out");
+        assert!(layout.pointer_over(&place, middle, dock_top + layout.geo.reach() as i32));
+        assert!(!layout.pointer_over(&place, middle, dock_top + layout.geo.reach() as i32 + 50));
+    }
+
+    #[test]
+    fn every_edge_finds_the_pointer_at_its_own_edge_and_the_taskbar_on_it_is_crossed() {
+        let layout = compute(&settings(), &small_dock(), 96, None);
+        let along = (layout.geo.panel_left + layout.geo.panel_w / 2.0) as i32;
+        // A 1920x1080 screen at (0, 0); a 48 px taskbar on the same edge as the dock.
+        let places = [
+            Place { edge: Edge::Bottom, start: 200, screen_edge: 1079, dock_edge: 1079 - 48 },
+            Place { edge: Edge::Left, start: 100, screen_edge: 0, dock_edge: 48 },
+            Place { edge: Edge::Right, start: 100, screen_edge: 1919, dock_edge: 1919 - 48 },
+        ];
+        for place in places {
+            let (x, y) = place.point(along, 0);
+            assert!(layout.at_reveal_edge(&place, x, y), "{:?}: the screen's own edge", place.edge);
+            assert_eq!(place.locate(x, y), (along, 0, -48), "{:?}", place.edge);
+            let (x, y) = place.point(along, 48);
+            assert!(!layout.at_reveal_edge(&place, x, y), "{:?}: the line beside the taskbar isn't the edge", place.edge);
+            assert!(layout.pointer_over(&place, x, y), "{:?}: crossing the taskbar, it stays out", place.edge);
+            let (x, y) = place.point(along, -1);
+            assert!(!layout.at_reveal_edge(&place, x, y) && !layout.near_edge(&place, x, y), "{:?}: past the edge, another screen", place.edge);
+            let (x, y) = place.point(-200, 0);
+            assert!(!layout.at_reveal_edge(&place, x, y), "{:?}: beyond the dock's span", place.edge);
+        }
+    }
+
+    #[test]
+    fn the_frame_turns_the_dock_to_its_edge_and_back() {
+        // A spot 10..20 along and 3..7 away from the edge, in a window 100 deep.
+        let at = |edge| Frame { edge, across: 100.0 }.rect(10.0, 3.0, 20.0, 7.0);
+        assert_eq!(at(Edge::Top), (10.0, 3.0, 20.0, 7.0));
+        assert_eq!(at(Edge::Bottom), (10.0, 93.0, 20.0, 97.0));
+        assert_eq!(at(Edge::Left), (3.0, 10.0, 7.0, 20.0));
+        assert_eq!(at(Edge::Right), (93.0, 10.0, 97.0, 20.0));
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            let frame = Frame { edge, across: 100.0 };
+            let (left, top, _, _) = frame.rect(15.0, 4.0, 15.0, 4.0);
+            assert_eq!(frame.from_window(left, top), (15.0, 4.0), "{edge:?}: there and back");
+            let (dx, dy) = frame.shift(5.0);
+            assert_eq!(frame.from_window(left + dx, top + dy), (15.0, 9.0), "{edge:?}: a shift moves away from the edge");
+        }
+        assert_eq!(Frame { edge: Edge::Left, across: 100.0 }.window_size(400, 100), (100, 400), "a side dock is tall");
+        assert_eq!(Frame { edge: Edge::Bottom, across: 100.0 }.window_size(400, 100), (400, 100));
     }
 
     #[test]
@@ -584,10 +768,11 @@ mod tests {
         let layout = compute(&settings(), &small_dock(), 144, None);
         let win_x = layout.window_x(0, 3840);
         let mid = win_x + layout.geo.panel_left as i32 + 100;
-        assert!(layout.at_reveal_edge(win_x, 0, mid, 0));
-        assert!(!layout.at_reveal_edge(win_x, 0, mid, 5), "must touch the edge");
-        assert!(!layout.at_reveal_edge(win_x, 0, 10, 0), "far left of the dock");
-        assert!(!layout.at_reveal_edge(win_x, 0, 3830, 0), "far right of the dock");
+        let place = top(win_x, 0, 0);
+        assert!(layout.at_reveal_edge(&place, mid, 0));
+        assert!(!layout.at_reveal_edge(&place, mid, 5), "must touch the edge");
+        assert!(!layout.at_reveal_edge(&place, 10, 0), "far left of the dock");
+        assert!(!layout.at_reveal_edge(&place, 3830, 0), "far right of the dock");
     }
 
     #[test]
@@ -595,9 +780,10 @@ mod tests {
         let layout = compute(&settings(), &small_dock(), 144, None);
         let win_x = layout.window_x(0, 3840);
         let mid = win_x + layout.geo.panel_left as i32 + 100;
-        assert!(layout.pointer_over(win_x, 0, 0, mid, 0));
-        assert!(layout.pointer_over(win_x, 0, 0, mid, layout.geo.reach() as i32));
-        assert!(!layout.pointer_over(win_x, 0, 0, mid, layout.geo.reach() as i32 + 50));
+        let place = top(win_x, 0, 0);
+        assert!(layout.pointer_over(&place, mid, 0));
+        assert!(layout.pointer_over(&place, mid, layout.geo.reach() as i32));
+        assert!(!layout.pointer_over(&place, mid, layout.geo.reach() as i32 + 50));
     }
 
     #[test]
@@ -662,6 +848,55 @@ mod tests {
         for slot in layout.slots.iter().filter(|s| !s.separator) {
             let (x, y, _) = icon_rect(&layout.geo, slot, 0.0, 0.0);
             assert_eq!((x, y), (x.round(), y.round()));
+        }
+    }
+
+    #[test]
+    fn a_capsule_floats_below_the_edge_with_round_ends_and_the_rest_keep_their_place() {
+        use crate::config::DockStyle;
+        let classic = compute(&settings(), &small_dock(), 96, None).geo;
+        let with = |style: DockStyle, dpi: u32| {
+            let mut s = settings();
+            s.style = style;
+            compute(&s, &small_dock(), dpi, None).geo
+        };
+        let capsule = with(DockStyle::Capsule, 96);
+        assert_eq!((classic.panel_top, classic.radius), (0.0, 7.0), "classic as it always was");
+        assert_eq!(capsule.panel_top, 8.0);
+        assert_eq!(capsule.pad_top, classic.pad_top + 8.0, "the icons move down with it");
+        assert_eq!(capsule.panel_h, classic.panel_h + 8.0);
+        assert_eq!(capsule.radius, ((capsule.panel_h - capsule.panel_top) / 2.0).floor(), "round ends");
+        assert_eq!(capsule.win_h, classic.win_h + 8, "the window reaches that much further");
+        assert_eq!(capsule.travel(), classic.travel() + 8.0, "and it slides that much further to hide");
+        assert_eq!(with(DockStyle::Capsule, 144).panel_top, 12.0, "scaled like everything else");
+        for style in [DockStyle::Glass, DockStyle::Frosted] {
+            let g = with(style, 96);
+            assert_eq!((g.panel_top, g.pad_top, g.panel_h, g.win_h), (0.0, classic.pad_top, classic.panel_h, classic.win_h), "{style:?} hangs from the edge");
+        }
+        assert_eq!((with(DockStyle::Glass, 96).radius, with(DockStyle::Frosted, 96).radius, with(DockStyle::Glass, 144).radius), (18.0, 12.0, 27.0));
+    }
+
+    #[test]
+    fn the_strip_goes_past_the_names_when_they_always_show() {
+        use crate::config::Edge;
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            let on_hover = {
+                let mut s = settings();
+                s.edge = edge;
+                compute(&s, &small_dock(), 96, None).geo
+            };
+            let always = {
+                let mut s = settings();
+                s.edge = edge;
+                s.always_show_labels = true;
+                compute(&s, &small_dock(), 96, None).geo
+            };
+            assert_eq!(on_hover.strip_top, on_hover.panel_h + 6.0, "{edge:?}: just past the panel, as always");
+            // The names start just past the panel (2 px on top or bottom, 8 beside it on a side).
+            let names_end = if edge.is_side() { always.panel_h + 8.0 + always.label_w } else { always.panel_h + 2.0 + always.label_h };
+            assert!(always.strip_top >= names_end, "{edge:?}: the strip at {} starts past the names ({names_end})", always.strip_top);
+            let strip_end = always.strip_top + if edge.is_side() { always.strip_w } else { always.strip_h };
+            assert!(strip_end <= always.win_h as f32, "{edge:?}: and the window has room for it");
         }
     }
 

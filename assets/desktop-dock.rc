@@ -130,7 +130,8 @@ BEGIN
   CONTROL         "", 1305, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 49, 220, 16
   LTEXT           "", 1306, 310, 52, 60, 10
   LTEXT           "Names", 1098, 0, 70, 300, 11
-  AUTOCHECKBOX    "Show the name under the icon you point at", 1307, 90, 83, 220, 12
+  LTEXT           "Show names", -1, 0, 85, 84, 10
+  COMBOBOX        1307, 90, 83, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
   LTEXT           "Name size", -1, 0, 100, 84, 10
   CONTROL         "", 1308, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 97, 220, 16
   LTEXT           "", 1309, 310, 100, 60, 10
@@ -176,7 +177,10 @@ BEGIN
   AUTOCHECKBOX    "Lock icons", 1411, 90, 125, 200, 12
   LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 102, 138, 263, 18
   AUTOCHECKBOX    "Start with Windows", 1412, 90, 159, 200, 12
-  LTEXT           "Show after: how long the pointer rests at the top edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 182, 365, 20
+  LTEXT           "Show after: how long the pointer rests at the screen's edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 182, 365, 20
+  LTEXT           "When you're not using it", 1098, 0, 206, 300, 11
+  LTEXT           "The dock", -1, 0, 223, 84, 10
+  COMBOBOX        1413, 90, 221, 160, 60, CBS_DROPDOWNLIST | WS_TABSTOP
 END
 
 // Screen: which screen the dock is on, what to know about its top edge, and a keyboard
@@ -188,13 +192,16 @@ BEGIN
   LTEXT           "Where the dock is", 1098, 0, 0, 300, 11
   LTEXT           "Show the dock on", -1, 0, 17, 84, 10
   COMBOBOX        2101, 90, 14, 220, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-  LTEXT           "", 2102, 90, 32, 275, 30
-  LTEXT           "Keyboard shortcut", 1098, 0, 68, 300, 11
-  LTEXT           "Show the dock with", -1, 0, 85, 84, 10
-  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 83, 140, 12
-  PUSHBUTTON      "Clear", 2104, 236, 82, 50, 14
-  LTEXT           "", 2105, 90, 100, 275, 20
-  LTEXT           "Press the shortcut again, or Esc, to send the dock back up. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 122, 365, 20
+  LTEXT           "Screen edge", -1, 0, 35, 84, 10
+  COMBOBOX        2106, 90, 32, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  PUSHBUTTON      "Taskbar settings...", 2107, 186, 31, 90, 14
+  LTEXT           "", 2102, 90, 50, 275, 30
+  LTEXT           "Keyboard shortcut", 1098, 0, 86, 300, 11
+  LTEXT           "Show the dock with", -1, 0, 103, 84, 10
+  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 101, 140, 12
+  PUSHBUTTON      "Clear", 2104, 236, 100, 50, 14
+  LTEXT           "", 2105, 90, 118, 275, 20
+  LTEXT           "Press the shortcut again, or Esc, to send the dock back. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 140, 365, 20
 END
 
 // Recently removed: the last 20 items taken off the dock; put one back, or forget them.
@@ -276,6 +283,12 @@ BEGIN
   LTEXT           "Log", 1098, 0, 124, 300, 11
   LTEXT           "What the dock did, and anything that went wrong, is written to its log (the last 512 KB are kept).", -1, 0, 139, 365, 12
   PUSHBUTTON      "Open the log", 1906, 0, 155, 70, 14
+  LTEXT           "Updates", 1098, 0, 178, 300, 11
+  AUTOCHECKBOX    "Check for a new version once a day", 1909, 0, 193, 220, 12
+  PUSHBUTTON      "Check now", 1910, 0, 210, 70, 14
+  PUSHBUTTON      "Update now", 1911, 76, 210, 70, 14
+  PUSHBUTTON      "What's new", 1912, 152, 210, 70, 14
+  LTEXT           "", 1913, 0, 228, 365, 18
 END
 
 // Setup: shown when the exe runs from anywhere but its install folder (src/setup.rs). The

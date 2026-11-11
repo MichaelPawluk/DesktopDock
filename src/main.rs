@@ -25,10 +25,12 @@ mod removed;
 mod render;
 mod settings;
 mod setup;
+mod skin;
 mod startup;
 mod store;
 mod system;
 mod target;
+mod update;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -85,6 +87,15 @@ fn main() {
             _ => settings::Open::Settings(spot),
         };
         std::process::exit(settings::run(home::locate(explicit_home), open));
+    }
+    // The update check helper (see update.rs): asks GitHub for the newest version, keeps the
+    // answer in the dock folder, exits. The dock runs it once a day when that's ticked, so its
+    // own memory never holds Windows' web code. `--check-updates --home <dir>`.
+    if let [flag, home_flag, dir] = raw.as_slice() {
+        if flag == "--check-updates" && home_flag == "--home" {
+            let status = update::check_and_keep(std::path::Path::new(dir));
+            std::process::exit(if status.error.is_empty() { 0 } else { 1 });
+        }
     }
     if let [flag, list, cache] = raw.as_slice() {
         if flag == "--make-icons" {
@@ -170,6 +181,13 @@ fn main() {
         }
         if let Some(dir) = exe.parent() {
             setup::remove_old_copies(dir); // versions an update renamed aside
+            // Again in a moment: the update that started this copy may not have exited yet, and
+            // a program that's still running can't be deleted.
+            let dir = dir.to_path_buf();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                setup::remove_old_copies(&dir);
+            });
         }
         let how = if all_args.iter().any(|arg| arg == system::STARTUP_FLAG) { "Windows started it at sign-in" } else { "started by hand or by setup" };
         log_info!("watchdog starting ({how}); dock folder {}", home.dir.display());

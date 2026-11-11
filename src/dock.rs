@@ -1,8 +1,11 @@
 //! The dock window: show/hide behaviour, hover and click handling, and drawing.
 //! The arithmetic lives in `layout` and `motion`, where it's unit-tested.
 
-use crate::config::{self, ChangeWatch, Config, DockLook, DockSettings, HoverGlow, ItemConfig, LaunchEffect};
+use crate::chrome;
+use crate::config::{self, ChangeWatch, Config, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, LaunchEffect, StayOut};
 use crate::config::Kind;
+use crate::skin::{self, Rgba, Skin};
+use crate::update;
 use crate::heal;
 use crate::hotkey;
 use crate::home::Home;
@@ -31,14 +34,15 @@ use windows::Win32::System::Ole::{OleInitialize, RegisterDragDrop, RevokeDragDro
 use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_GRADIENT_STOP};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
     ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
     DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
     IDWriteTextFormat,
 };
@@ -50,7 +54,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    ASFW_ANY, AllowSetForegroundWindow, GetMessageW, GetWindowRect, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
+    ASFW_ANY, AllowSetForegroundWindow, GetMessageW, GetWindowRect, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
     IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, PM_REMOVE, PeekMessageW, PostMessageW, ENDSESSION_LOGOFF, WM_ENDSESSION,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
@@ -78,6 +82,22 @@ const TIMER_READ_RETRY: usize = 5;
 /// objects), so a slow leak in real use shows up in the log.
 const TIMER_HEALTH: usize = 7;
 const HEALTH_EVERY_MS: u32 = 60 * 60 * 1000;
+/// The daily check for a new version (when ticked): a minute and a half after the dock starts
+/// (unless it was checked today already), then once a day; telling about one found, again in a
+/// while if it couldn't come out to say so (a full-screen game, nobody there).
+const TIMER_UPDATES: usize = 9;
+const TIMER_UPDATE_TELL: usize = 10;
+/// Staying out, resting: a moment later, the drawing buffer goes and the heaps hand back their
+/// free space, as when it hides (Windows keeps the picture on screen).
+const TIMER_REST_TIDY: usize = 11;
+const REST_TIDY_MS: u32 = 2000;
+/// On a side, the space between the icons and their names (in pixels at 100%).
+const SIDE_TEXT_GAP: f32 = 8.0;
+/// Staying out but sent away by a full-screen program: how often it looks whether it can come back.
+const COME_BACK_EVERY: Duration = Duration::from_secs(1);
+const UPDATES_FIRST_MS: u32 = 90 * 1000;
+const UPDATES_EVERY_MS: u32 = 24 * 60 * 60 * 1000;
+const UPDATE_TELL_AGAIN_MS: u32 = 10 * 60 * 1000;
 /// One-shot: the very first start's welcome, once the icons are in (see `welcome`).
 const TIMER_WELCOME: usize = 8;
 const WELCOME_AFTER_MS: u32 = 800;
@@ -139,6 +159,7 @@ const MENU_PROPERTIES: usize = 19;
 const MENU_NEW_GROUP: usize = 20;
 const MENU_UNGROUP: usize = 21;
 const MENU_OPEN_LOCATION: usize = 22;
+const MENU_AUTO_HIDE: usize = 23;
 /// Move to group ▸: one entry per group on the dock.
 const MENU_TO_GROUP: usize = 200;
 /// Add ▸ Windows item ▸ (one entry per places::all() entry, from here).
@@ -196,6 +217,8 @@ const WM_APP_PREVIEW: u32 = WM_APP + 11;
 const WM_APP_MISSING_CHECKED: u32 = WM_APP + 12;
 /// Posted when the look at the icons' files finishes (see `check_icon_stamps`).
 const WM_APP_STAMPS_CHECKED: u32 = WM_APP + 13;
+/// The update check helper finished (see `check_for_updates`).
+const WM_APP_UPDATES_CHECKED: u32 = WM_APP + 14;
 /// How often, at most, the dock looks for programs updated since their icons were made.
 const STAMP_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How long the dock stays out after the settings window's last change.
@@ -357,6 +380,13 @@ pub struct Dock {
     renderer: Renderer,
     brush: ID2D1SolidColorBrush,
     fill: Option<ID2D1LinearGradientBrush>,
+    /// The panel's colours, edge and corners for the style in use (see `skin`).
+    skin: Skin,
+    /// Windows' apps set to dark, as last seen (the capsule style follows it).
+    windows_dark: bool,
+    /// Every icon's name, drawn once while names are always shown (see `names_picture`);
+    /// gone when the layout changes and while the dock is out of sight.
+    names: Option<Names>,
     /// Windows' accent colour, brightened to glow (see `HoverGlow::Accent`).
     accent: [f32; 3],
     /// The glow's brushes, one per colour (made as needed; dropped when the layout changes).
@@ -365,6 +395,12 @@ pub struct Dock {
     /// reloads like the icons themselves.
     tints: HashMap<Vec<IconSource>, Option<[f32; 3]>>,
     text_format: Option<IDWriteTextFormat>,
+    /// The names under the icons when always shown: one line, cut short with "…".
+    names_format: Option<IDWriteTextFormat>,
+    /// On a side, names beside the icons (see `apply_layout`).
+    side_format: Option<IDWriteTextFormat>,
+    /// The strip's text on several lines (on a side, where a long one wouldn't fit).
+    strip_format: Option<IDWriteTextFormat>,
     /// Where the dock lives: the work area's left, top and right (beside and below any taskbar
     /// or app bar), and the screen's bottom.
     monitor: RECT,
@@ -384,6 +420,14 @@ pub struct Dock {
     /// Pointer away from the shown dock (hide delay).
     leave: Dwell,
     linger_until: Option<Instant>,
+    /// Staying out (auto_hide off): it's resting, nobody using it (see `rest`).
+    resting: bool,
+    /// Staying out behind windows: it's at the bottom of the windows now, under any that cover
+    /// it (resting the pointer at the edge brings it over them: see `raise`).
+    lowered: bool,
+    /// Staying out but sent away (a full-screen program): when it last looked whether it can
+    /// come back.
+    come_back_looked: Option<Instant>,
     /// Since when the button has been up while a press or a drag is still on (its release not
     /// heard yet): see `MISSED_RELEASE_AFTER`.
     button_up_since: Option<Instant>,
@@ -584,8 +628,20 @@ struct Strip {
     text: Vec<u16>,
     rect: D2D_RECT_F,
     text_rect: D2D_RECT_F,
+    /// Its text on more than one line (a long one on a side).
+    wrapped: bool,
     /// Where "Undo" sits; None for a plain notice ("Icons are locked").
     undo_rect: Option<D2D_RECT_F>,
+}
+
+/// Every icon's name drawn once, side by side in one picture, each in a cell as wide as an
+/// icon's slot and cut short with "…" to fit it (while names are always shown).
+struct Names {
+    picture: ID2D1Bitmap,
+    cell_w: f32,
+    cell_h: f32,
+    /// The cell (from the left) of each item's name; None for separators.
+    cell_of: Vec<Option<usize>>,
 }
 
 /// The glow mask's width and height in pixels: smooth when stretched to the largest glow.
@@ -659,10 +715,16 @@ impl Dock {
             renderer,
             brush,
             fill: None,
+            skin: skin::skin(DockStyle::Classic, DockLook::Light, false),
+            windows_dark: chrome::windows_is_dark(),
+            names: None,
             accent: system::accent_colour().map_or(DEFAULT_GLOW, icons::glow_bright),
             glow_mask: None,
             tints: HashMap::new(),
             text_format: None,
+            names_format: None,
+            side_format: None,
+            strip_format: None,
             monitor: RECT::default(),
             screen: system::Screen::default(),
             win_x: 0,
@@ -676,6 +738,9 @@ impl Dock {
             edge: Dwell::default(),
             leave: Dwell::default(),
             linger_until: None,
+            resting: false,
+            lowered: false,
+            come_back_looked: None,
             button_up_since: None,
             previewing: false,
             poll_ms: 0,
@@ -803,16 +868,19 @@ impl Dock {
         let dpi = screen.dpi;
         self.monitor = monitor;
         self.dpi = dpi;
-        // Sliding by moving the window passes above the dock's top edge: never over a taskbar at
-        // the top or onto a screen above. Then it slides by drawing instead.
-        self.slide_by_moving = !system::monitor_above(screen.monitor) && screen.work.top == screen.monitor.top;
+        // Sliding by moving the window passes beyond the dock's edge: never over a taskbar on that
+        // edge or onto a screen beyond it. Then it slides by drawing instead.
+        let edge = self.settings.edge;
+        self.slide_by_moving = !system::monitor_beyond(screen.monitor, edge) && system::work_reaches_edge(&screen, edge);
+        // Along the edge: the work area's span (beside any taskbar), to fit and centre in.
+        let (from, to) = if edge.is_side() { (screen.work.top, screen.work.bottom) } else { (screen.work.left, screen.work.right) };
         self.screen = screen;
         let separators: Vec<bool> = self.items.iter().map(|item| item.cfg.is_separator()).collect();
         // Shrink to fit the screen, keeping a small margin at each end.
         let margin = (8.0 * dpi as f32 / 96.0).round();
-        let max_width = (monitor.right - monitor.left) as f32 - 2.0 * margin;
+        let max_width = (to - from) as f32 - 2.0 * margin;
         self.layout = layout::compute(&self.settings, &separators, dpi, Some(max_width));
-        self.win_x = self.layout.window_x(monitor.left, monitor.right);
+        self.win_x = self.layout.window_x(from, to);
         let g = self.layout.geo;
 
         unsafe {
@@ -855,30 +923,37 @@ impl Dock {
             self.popup_format = make(DWRITE_FONT_WEIGHT_NORMAL, size, true, true); // two lines, then "…"
             self.popup_wrap_format = make(DWRITE_FONT_WEIGHT_NORMAL, size, true, false);
             self.popup_title_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size + 1.5 * g.scale, false, true);
+            self.names_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, false, true);
+            // On a side, names beside the icons: from the icon outward, centred on it, cut short.
+            self.side_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, false, true).inspect(|format| {
+                let _ = format.SetTextAlignment(if g.edge == Edge::Right { DWRITE_TEXT_ALIGNMENT_TRAILING } else { DWRITE_TEXT_ALIGNMENT_LEADING });
+                let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            });
+            self.strip_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, true, false).inspect(|format| {
+                let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            });
 
-            // CrystalXP's fill: white, brightening from 8% at the screen edge to 49% at the bottom
-            // (times the background opacity setting).
+            // The style's colours (see `skin`), and its fill from the panel's top (the screen edge,
+            // unless it floats) to its bottom, at the background opacity setting.
+            self.skin = skin::skin(self.settings.style, self.settings.look, self.windows_dark);
+            self.names = None;
             let solid = self.settings.background_opacity as f32 / 100.0;
-            let look = self.settings.look;
-            let stops = match look {
-                DockLook::Light => [
-                    D2D1_GRADIENT_STOP { position: 0.0, color: rgba(1.0, 1.0, 1.0, 0.08 * solid) },
-                    D2D1_GRADIENT_STOP { position: 1.0, color: rgba(1.0, 1.0, 1.0, 0.49 * solid) },
-                ],
-                // Dark: smoked glass, deepening toward the bottom edge.
-                DockLook::Dark => [
-                    D2D1_GRADIENT_STOP { position: 0.0, color: rgba(0.06, 0.06, 0.08, 0.55 * solid) },
-                    D2D1_GRADIENT_STOP { position: 1.0, color: rgba(0.06, 0.06, 0.08, 0.80 * solid) },
-                ],
-            };
+            let colour = |Rgba(r, gr, b, a): Rgba| rgba(r, gr, b, a * solid);
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: colour(self.skin.fill_top) },
+                D2D1_GRADIENT_STOP { position: 1.0, color: colour(self.skin.fill_bottom) },
+            ];
             let rt = &self.renderer.rt;
+            // (From the dock's edge outward, whichever edge that is.)
+            let (start_x, start_y, _, _) = g.frame().rect(0.0, g.panel_top, 0.0, g.panel_top);
+            let (end_x, end_y, _, _) = g.frame().rect(0.0, g.panel_h, 0.0, g.panel_h);
             self.fill = rt
                 .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
                 .and_then(|collection| {
                     rt.CreateLinearGradientBrush(
                         &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                            startPoint: Vector2 { X: 0.0, Y: 0.0 },
-                            endPoint: Vector2 { X: 0.0, Y: g.panel_h },
+                            startPoint: Vector2 { X: start_x, Y: start_y },
+                            endPoint: Vector2 { X: end_x, Y: end_y },
                         },
                         None,
                         &collection,
@@ -1152,6 +1227,9 @@ impl Dock {
             let item = &mut self.items[index];
             item.label = format!("{} (not found)", item.cfg.name).encode_utf16().collect();
         }
+        if !self.missing.is_empty() {
+            self.names = None; // drawn again with "(not found)"
+        }
         // Each program is mentioned once per session, however often it's repaired.
         let news: Vec<&heal::Fix> = report.fixed.iter().filter(|fix| self.repairs_told.insert(fix.name.to_lowercase())).collect();
         if !news.is_empty() {
@@ -1258,7 +1336,7 @@ impl Dock {
         }
         self.stale_icons.extend(changed);
         self.refresh_on_hide = true;
-        if !self.window_visible {
+        if !self.window_visible || self.resting {
             self.refresh_hidden();
         }
     }
@@ -1269,7 +1347,7 @@ impl Dock {
         if back {
             log_info!("a missing item is back; refreshing the dock when it hides");
             self.refresh_on_hide = true;
-            if !self.window_visible {
+            if !self.window_visible || self.resting {
                 self.refresh_hidden();
             }
         }
@@ -1313,7 +1391,16 @@ impl Dock {
     fn test_state(&self) -> String {
         let g = self.layout.geo;
         let s = &self.settings;
-        let (x, top) = (self.win_x as f32, self.monitor.top as f32);
+        // The dock's own directions (along, away from its edge) on the screen, all the way out.
+        let (out_x, out_y) = self.origin_at(0);
+        let (out_x, out_y) = (out_x as f32, out_y as f32);
+        let frame = g.frame();
+        let out_rect = |along0: f32, away0: f32, along1: f32, away1: f32| {
+            let (left, top, right, bottom) = frame.rect(along0, away0, along1, away1);
+            json_rect(out_x + left, out_y + top, out_x + right, out_y + bottom)
+        };
+        // Where the pointer brings it out: the screen's edge, in the middle of the dock.
+        let (reveal_x, reveal_y) = self.place().point(g.win_w / 2, 0);
         let mut window = RECT::default();
         if let Some(hwnd) = self.hwnd {
             let _ = unsafe { GetWindowRect(hwnd, &mut window) };
@@ -1326,13 +1413,13 @@ impl Dock {
                 let cfg = &item.cfg;
                 // Its icon, and its whole slot (the gaps either side count as it too).
                 let place = self.layout.slots.iter().find(|slot| slot.item == index).map_or(r#""rect":null,"slot":null"#.to_string(), |slot| {
-                    let (left, centre) = (x + g.origin + slot.left, x + slot.center(&g));
+                    let (left, centre) = (g.origin + slot.left, slot.center(&g));
                     let half = if slot.separator { slot.width / 2.0 } else { g.icon / 2.0 };
-                    let (icon_top, icon_bottom) = (top + g.pad_top, top + g.pad_top + g.icon);
+                    let (icon_top, icon_bottom) = (g.pad_top, g.pad_top + g.icon);
                     format!(
                         r#""rect":{},"slot":{}"#,
-                        json_rect(centre - half, icon_top, centre + half, icon_bottom),
-                        json_rect(left, icon_top, left + slot.width, icon_bottom)
+                        out_rect(centre - half, icon_top, centre + half, icon_bottom),
+                        out_rect(left, icon_top, left + slot.width, icon_bottom)
                     )
                 });
                 let children: Vec<String> = item
@@ -1402,7 +1489,7 @@ impl Dock {
             )
         });
         let strip = self.strip.as_ref().map_or("null".to_string(), |strip| {
-            let on_screen = |r: &D2D_RECT_F| json_rect(x + r.left, top + r.top, x + r.right, top + r.bottom);
+            let on_screen = |r: &D2D_RECT_F| json_rect(out_x + r.left, out_y + r.top, out_x + r.right, out_y + r.bottom);
             format!(
                 r#"{{"text":{},"rect":{},"undo":{}}}"#,
                 json_text(&String::from_utf16_lossy(&strip.text)),
@@ -1415,8 +1502,8 @@ impl Dock {
                 r#"{{"window":{{"rect":{},"visible":{},"reveal":{:.3},"reveal_target":{:.3}}},"#,
                 r#""mode":"{:?}","safe_mode":{},"locked":{},"bin_full":{},"menu_open":{},"dragging":{},"picking":{},"hovered":{},"#,
                 r#""hotkey":{},"hotkey_registered":{},"screen":{{"id":{},"number":{},"main":{},"dpi":{}}},"#,
-                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","hover_glow":"{:?}","monitor":{}}},"#,
-                r#""pixels":{{"scale":{},"icon":{},"zoom":{},"gap":{},"panel":{}}},"#,
+                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"always_show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","style":"{:?}","hover_glow":"{:?}","monitor":{},"auto_hide":{},"stay_out":"{:?}","edge":"{:?}"}},"resting":{},"lowered":{},"poll_ms":{},"reveal_point":{{"x":{},"y":{}}},"#,
+                r#""pixels":{{"scale":{},"icon":{},"zoom":{},"gap":{},"panel":{},"panel_top":{},"radius":{}}},"windows_dark":{},"#,
                 r#""undo":{},"strip":{},"drag":{},"group":{},"items":[{}]}}"#,
             ),
             json_rect(window.left as f32, window.top as f32, window.right as f32, window.bottom as f32),
@@ -1446,18 +1533,31 @@ impl Dock {
             s.slide_in_ms,
             s.slide_out_ms,
             s.show_labels,
+            s.always_show_labels,
             s.label_size,
             s.background_opacity,
             s.icon_opacity,
             s.launch_effect,
             s.look,
+            s.style,
             s.hover_glow,
             json_text(&s.monitor),
+            s.auto_hide,
+            s.stay_out,
+            s.edge,
+            self.resting,
+            self.lowered,
+            self.poll_ms,
+            reveal_x,
+            reveal_y,
             g.scale,
             g.icon,
             g.hover_icon,
             g.gap,
-            json_rect(x + g.panel_left, top, x + g.panel_left + g.panel_w, top + g.panel_h),
+            out_rect(g.panel_left, 0.0, g.panel_left + g.panel_w, g.panel_h),
+            g.panel_top,
+            g.radius,
+            self.windows_dark,
             self.undo.as_ref().map_or("null".to_string(), |step| json_text(&step.what)),
             strip,
             drag,
@@ -1568,8 +1668,13 @@ impl Dock {
         self.previewing = false;
         let config = parsed.config;
         let previous = self.take_icons();
+        let checking_was = self.settings.check_updates;
+        let staying_was = (self.settings.auto_hide, self.settings.stay_out);
         self.settings = config.dock;
         self.apply_hotkey();
+        if self.settings.check_updates != checking_was {
+            self.schedule_update_check(true);
+        }
         self.items = config.items.into_iter().map(Item::new).collect();
         self.hovered = None;
         self.pressed = None;
@@ -1578,6 +1683,9 @@ impl Dock {
         self.relayout_keeping(previous);
         if self.window_visible {
             self.render(); // when hidden, the next reveal draws it
+        }
+        if (self.settings.auto_hide, self.settings.stay_out) != staying_was {
+            self.apply_staying_out();
         }
         self.start_heal();
         Ok(())
@@ -1679,6 +1787,15 @@ impl Dock {
         self.reload_keeping_undo()
     }
 
+    /// Right-click > Hide automatically: on, it slides out of sight as usual; off, it stays out
+    /// the way it was last set to (behind windows, unless Dock settings says on top).
+    fn set_auto_hide(&mut self, auto_hide: bool) -> std::result::Result<(), String> {
+        let (store, _) = self.editable()?;
+        store.edit(|doc| edit::set_dock(doc, "auto_hide", auto_hide))?;
+        log_info!("hide automatically: {}", if auto_hide { "on" } else { "off" });
+        self.reload_keeping_undo()
+    }
+
     // ---- Dragging icons -------------------------------------------------------------------------
 
     /// The button went down on an icon and the pointer has since moved past Windows' own drag
@@ -1702,8 +1819,11 @@ impl Dock {
             return;
         };
         let (x, y, size) = layout::icon_rect(&g, slot, item.hover_t, 0.0);
-        let left = self.win_x as f32 + x;
-        let top = self.window_y() as f32 + self.content_offset() + y;
+        // The icon's top-left corner on the screen, wherever the dock's edge is.
+        let offset = self.content_offset();
+        let (icon_left, icon_top, _, _) = g.frame().rect(x, y + offset, x + size, y + size + offset);
+        let (window_left, window_top) = self.origin();
+        let (left, top) = (window_left as f32 + icon_left, window_top as f32 + icon_top);
         self.drag = Some(Drag {
             index,
             label: edit::label_of(&item.cfg),
@@ -1733,8 +1853,7 @@ impl Dock {
             return;
         }
         let Some(pt) = system::cursor_pos() else { return };
-        let x = (pt.x - self.win_x) as f32;
-        let y = (pt.y - self.window_y()) as f32 - self.content_offset();
+        let (x, y) = self.from_screen(pt.x, pt.y);
         let Some((index, child)) = self.drag.as_ref().map(|drag| (drag.index, drag.child)) else { return };
         let now = Instant::now();
         // A whole group never goes inside a group, nor does a separator (a group holds things to open).
@@ -1781,7 +1900,9 @@ impl Dock {
         // path leaves the group's narrow middle while still at the dock's height.)
         let slack = self.layout.geo.icon;
         let above_popup = self.group.as_ref().is_some_and(|open| {
-            pt.x as f32 >= open.layout.x as f32 - slack && (pt.x as f32) < (open.layout.x + open.layout.width) as f32 + slack
+            // (Along the dock: across the screen on top or bottom, up and down on a side.)
+            let (at, from, size) = if self.layout.geo.edge.is_side() { (pt.y, open.layout.y, open.layout.height) } else { (pt.x, open.layout.x, open.layout.width) };
+            at as f32 >= from as f32 - slack && (at as f32) < (from + size) as f32 + slack
         });
         let leave_sprung = sprung && in_popup.is_none() && into.is_none() && y < self.layout.geo.panel_h && !above_popup;
         if let Some(drag) = &mut self.drag {
@@ -2083,8 +2204,8 @@ impl Dock {
     fn drop_over(&mut self, pt: POINT) -> bool {
         let Some(previous) = self.incoming.as_ref().map(|incoming| incoming.onto) else { return false };
         // Measured against where the dock is when fully out, so this works while it slides in.
-        let x = (pt.x - self.win_x) as f32;
-        let y = (pt.y - self.monitor.top) as f32;
+        let (along, _, from_dock) = self.place().locate(pt.x, pt.y);
+        let (x, y) = (along as f32, from_dock as f32);
         let onto = self.layout.onto_icon(x, y).filter(|&index| self.takes_drops(index));
         let gap = if onto.is_some() || self.layout.drag_is_off(x, y) { None } else { Some(self.layout.insert_gap(x)) };
         let label = match onto {
@@ -2316,11 +2437,18 @@ impl Dock {
         self.zone_nudged = false;
         unsafe {
             if show {
+                // Along the screen's own edge (beyond a taskbar on it, where the pointer stops),
+                // as long as the panel.
                 let g = self.layout.geo;
-                let left = self.win_x + g.panel_left as i32;
-                let height = (3.0 * g.scale).round() as i32;
+                let place = self.place();
+                // (From the edge's own row or column, where the pointer stops, inward.)
+                let thick = ((3.0 * g.scale).round() as i32).max(1);
+                let (x0, y0) = place.point(g.panel_left as i32, 0);
+                let (x1, y1) = place.point((g.panel_left + g.panel_w) as i32 - 1, thick - 1);
+                let (left, top) = (x0.min(x1), y0.min(y1));
+                let (width, height) = ((x1 - x0).abs() + 1, (y1 - y0).abs() + 1);
                 let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
-                let _ = SetWindowPos(zone, Some(HWND_TOPMOST), left, self.monitor.top, g.panel_w as i32, height, flags);
+                let _ = SetWindowPos(zone, Some(HWND_TOPMOST), left, top, width, height, flags);
             } else {
                 let _ = ShowWindow(zone, SW_HIDE);
             }
@@ -2391,6 +2519,68 @@ impl Dock {
         self.put_strip(message, false);
     }
 
+    /// The daily check for a new version, when ticked (Dock settings > About): the first a minute
+    /// and a half from now, unless it was checked today already (`soon`: the dock just started,
+    /// or the box was just ticked); off when it isn't ticked.
+    fn schedule_update_check(&mut self, soon: bool) {
+        self.stop_timer(TIMER_UPDATES);
+        if !self.settings.check_updates || self.safe_mode {
+            self.stop_timer(TIMER_UPDATE_TELL); // nothing said that was waiting either
+            return;
+        }
+        let today = crate::log::now_text()[..10].to_string();
+        let checked_today = update::Status::load(&self.home.dir).checked.starts_with(&today);
+        self.start_timer(TIMER_UPDATES, if soon && !checked_today { UPDATES_FIRST_MS } else { UPDATES_EVERY_MS });
+    }
+
+    /// Asks GitHub in a helper (`--check-updates`), so the dock's own memory never holds
+    /// Windows' web code; the helper keeps what it found in the dock folder, and the dock looks
+    /// once it's done.
+    fn check_for_updates(&mut self) {
+        self.schedule_update_check(false);
+        let Some(hwnd) = self.hwnd else { return };
+        let (dir, hwnd) = (self.home.dir.clone(), hwnd.0 as isize);
+        log_info!("checking for a new version (once a day, as ticked)");
+        std::thread::spawn(move || {
+            let ran = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--check-updates").arg("--home").arg(&dir).status());
+            if let Err(e) = ran {
+                log_warn!("couldn't check for a new version: {e}");
+            }
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd as *mut std::ffi::c_void)), WM_APP_UPDATES_CHECKED, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    /// A newer version was found: the dock comes out once to say so (once per version), unless
+    /// it can't just now (a full-screen game, nobody there): then it tries again in a while.
+    fn tell_about_update(&mut self) {
+        if !self.settings.check_updates {
+            return; // (unticked since the check began)
+        }
+        let mut status = update::Status::load(&self.home.dir);
+        if !status.error.is_empty() {
+            log_info!("couldn't check for a new version: {}", status.error);
+            return;
+        }
+        let Some(version) = status.latest_version() else { return };
+        if !update::is_newer(version, update::this_version()) || status.told == status.latest {
+            log_info!("newest version {} (this is {})", status.latest, update::shown(update::this_version()));
+            return;
+        }
+        self.peek();
+        if self.reveal_target < 0.5 {
+            self.start_timer(TIMER_UPDATE_TELL, UPDATE_TELL_AGAIN_MS);
+            return;
+        }
+        self.show_notice(&format!("Desktop Dock {} is out: see Dock settings > About.", status.latest));
+        self.linger_until = Some(Instant::now() + WELCOME_FOR);
+        self.start_timer(TIMER_STRIP, WELCOME_FOR.as_millis() as u32);
+        log_info!("said Desktop Dock {} is out", status.latest);
+        status.told = status.latest.clone();
+        status.save(&self.home.dir);
+    }
+
     /// The very first start (a new dock was just made, by setup or a new portable copy): the
     /// dock comes out for a few seconds with a line saying how to bring it out, so someone new
     /// sees where it lives. Not over a fullscreen app, nor with nobody there.
@@ -2399,7 +2589,12 @@ impl Dock {
         if self.reveal_target < 0.5 {
             return;
         }
-        self.show_notice("Rest the pointer at the top of the screen to bring your dock out.");
+        self.show_notice(match self.settings.edge {
+            Edge::Top => "Rest the pointer at the top of the screen to bring your dock out.",
+            Edge::Bottom => "Rest the pointer at the bottom edge of the screen to bring your dock out.",
+            Edge::Left => "Rest the pointer at the left edge of the screen to bring your dock out.",
+            Edge::Right => "Rest the pointer at the right edge of the screen to bring your dock out.",
+        });
         self.linger_until = Some(Instant::now() + WELCOME_FOR);
         self.start_timer(TIMER_STRIP, WELCOME_FOR.as_millis() as u32);
         log_info!("first start: the dock came out to show where it lives");
@@ -2413,15 +2608,34 @@ impl Dock {
         let text_w = self.text_width(&text);
         let undo_w = if undoable { self.text_width(&undo) } else { 0.0 };
         let (pad, gap) = (12.0 * g.scale, if undoable { 14.0 * g.scale } else { 0.0 });
+        // On a side there's only so much room beside the panel: a longer text goes on more lines.
+        let room = (g.strip_w - g.shadow - 2.0 * pad - gap - undo_w).floor().max(40.0 * g.scale);
+        let (text_w, text_h) = match &self.strip_format {
+            Some(format) if g.edge.is_side() && text_w > room => (room, self.text_height_in(&text, format, room).ceil()),
+            _ => (text_w, 0.0),
+        };
+        let wrapped = text_h > 0.0;
+        let height = if wrapped { (text_h + 12.0 * g.scale).round().max(g.strip_h) } else { g.strip_h };
         let width = (pad + text_w + gap + undo_w + pad).round();
-        let left = (g.panel_left + (g.panel_w - width) / 2.0).round();
-        let (top, bottom) = (g.strip_top, g.strip_top + g.strip_h);
+        // Under the panel (over it, on the bottom edge), centred; on a side, beside the panel's
+        // middle. Its text always reads left to right, Undo last.
+        let frame = g.frame();
+        let (left, top) = if g.edge.is_side() {
+            let (left, _, _, _) = frame.rect(0.0, g.strip_top, 0.0, g.strip_top + width);
+            (left, (g.panel_left + g.panel_w / 2.0 - height / 2.0).round())
+        } else {
+            let (_, top, _, _) = frame.rect(0.0, g.strip_top, 0.0, g.strip_top + g.strip_h);
+            ((g.panel_left + (g.panel_w - width) / 2.0).round(), top)
+        };
+        let (top, bottom) = (top, top + height);
         let text_left = left + pad;
         let undo_left = text_left + text_w + gap;
+        let text_rect = if wrapped { rect(text_left, ((top + bottom - text_h) / 2.0).round(), text_left + text_w, bottom) } else { rect(text_left, top, text_left + text_w, bottom) };
         self.strip = Some(Strip {
             text,
             rect: rect(left, top, left + width, bottom),
-            text_rect: rect(text_left, top, text_left + text_w, bottom),
+            text_rect,
+            wrapped,
             undo_rect: undoable.then(|| rect(undo_left, top, undo_left + undo_w, bottom)),
         });
         let now = Instant::now();
@@ -2554,8 +2768,21 @@ impl Dock {
                 self.render();
             }
         }
-        // After Explorer restarts or the display changes, make sure the dock is still on top.
-        if let (true, Some(hwnd)) = (self.window_visible, self.hwnd) {
+        // Windows' apps switched between light and dark: the capsule style follows.
+        let dark = chrome::windows_is_dark();
+        if dark != self.windows_dark {
+            self.windows_dark = dark;
+            if skin::follows_windows(self.settings.style) {
+                log_info!("Windows' apps are {} now; the dock follows", if dark { "dark" } else { "light" });
+                self.apply_layout();
+                if self.window_visible {
+                    self.render();
+                }
+            }
+        }
+        // After Explorer restarts or the display changes, make sure the dock is still on top
+        // (unless it's resting behind windows).
+        if let (true, false, Some(hwnd)) = (self.window_visible, self.lowered, self.hwnd) {
             unsafe {
                 let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
@@ -2583,6 +2810,9 @@ impl Dock {
             self.stop_timer(TIMER_PRESENCE);
             self.set_poll(100);
             self.schedule_recheck();
+            if self.stays_out() {
+                self.apply_staying_out(); // out again, as it was
+            }
         }
     }
 
@@ -2614,6 +2844,7 @@ impl Dock {
                 }
             }
             self.window_visible = true;
+            self.lowered = false;
         }
         self.reveal_target = 1.0;
         self.check_recycle_bin();
@@ -2628,12 +2859,90 @@ impl Dock {
         self.pressed = None;
         self.leave.reset();
         self.linger_until = None;
+        self.resting = false;
+        self.stop_timer(TIMER_REST_TIDY);
         if self.previewing {
             // A preview that was never saved (the slider went back, or the window closed):
             // back to what dock.toml says.
             if let Err(e) = self.reload() {
                 log_warn!("couldn't go back from a preview: {e}");
             }
+        }
+    }
+
+    /// The dock doesn't hide when you're not using it (auto_hide off): it stays out.
+    fn stays_out(&self) -> bool {
+        !self.settings.auto_hide
+    }
+
+    /// Staying out, nobody using it: what hiding would do, but it stays where it is (behind
+    /// windows: under them, see `lower`), and a moment later lets go of its drawing buffer.
+    fn rest(&mut self) {
+        self.close_group("the dock rested");
+        self.hovered = None;
+        self.pressed = None;
+        self.leave.reset();
+        self.edge.reset();
+        self.linger_until = None;
+        self.resting = true;
+        if self.settings.stay_out == StayOut::BehindWindows {
+            self.lower();
+        }
+        if self.previewing {
+            if let Err(e) = self.reload() {
+                log_warn!("couldn't go back from a preview: {e}");
+            }
+        }
+        self.start_timer(TIMER_REST_TIDY, REST_TIDY_MS);
+    }
+
+    /// Staying out behind windows: to the bottom of the windows, so any window covers it (it
+    /// shows on the desktop). Each time it rests, whatever happened since (a click on it, its
+    /// menu, coming back after a full-screen program).
+    fn lower(&mut self) {
+        if let Some(hwnd) = self.hwnd {
+            unsafe {
+                let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            self.lowered = true;
+        }
+    }
+
+    /// Over every window again (to be used, or because it no longer stays behind them).
+    fn raise(&mut self) {
+        if let Some(hwnd) = self.hwnd {
+            unsafe {
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        if self.lowered {
+            log_info!("over the windows (the pointer rested at the edge)");
+        }
+        self.lowered = false;
+        self.resting = false;
+        self.edge.reset();
+    }
+
+    /// Hiding turned off or on, or the way it stays out changed (dock.toml, Dock settings, the
+    /// right-click menu): out and resting, or back to hiding as usual.
+    fn apply_staying_out(&mut self) {
+        if self.stays_out() {
+            if self.reveal_target < 0.5 && !self.presence.away() && !self.fullscreen_in_front() {
+                self.show();
+            }
+            if self.window_visible {
+                self.raise(); // on top, or brought up to rest behind afresh
+                self.rest();
+            }
+            log_info!("stays out ({})", if self.settings.stay_out == StayOut::OnTop { "on top of windows" } else { "behind windows" });
+        } else {
+            self.stop_timer(TIMER_REST_TIDY);
+            if self.window_visible {
+                self.raise();
+                self.hide(); // it comes out at the edge as usual from now on
+            }
+            self.resting = false;
+            log_info!("hides automatically");
         }
     }
 
@@ -2687,6 +2996,17 @@ impl Dock {
         if self.presence.away() || self.fullscreen_in_front() {
             return;
         }
+        if self.stays_out() && self.window_visible {
+            // Staying out: the shortcut brings it over the windows covering it (until the
+            // pointer has been on it and left, or Esc).
+            if self.lowered {
+                system::forget_escape();
+                self.raise();
+                self.linger_until = Some(Instant::now() + SUMMON_FOR);
+                self.set_poll(16);
+            }
+            return;
+        }
         if self.reveal_target >= 0.5 {
             self.hide();
             return;
@@ -2702,6 +3022,9 @@ impl Dock {
     fn peek(&mut self) {
         if self.presence.away() || self.fullscreen_in_front() {
             return;
+        }
+        if self.lowered {
+            self.raise(); // staying out behind windows: over them, to be seen
         }
         let now = Instant::now();
         if self.linger_until.is_none() {
@@ -2758,10 +3081,19 @@ impl Dock {
             scale: g.scale,
             line_h: (self.settings.label_size * 1.4 * g.scale).ceil(), // Segoe UI's own line height
             anchor_x: self.win_x as f32 + slot.center(&g) + item.shift,
-            top: self.monitor.top as f32 + g.reach() + (6.0 * g.scale).round(),
-            screen_left: self.monitor.left as f32,
-            screen_right: self.monitor.right as f32,
+            // Just past how far the icons reach from the dock's edge, on the screen.
+            top: {
+                let (edge, past) = (self.place().dock_edge as f32, g.reach() + (6.0 * g.scale).round());
+                match self.settings.edge {
+                    Edge::Top | Edge::Left => edge + past,
+                    Edge::Bottom | Edge::Right => edge + 1.0 - past,
+                }
+            },
+            screen_left: self.screen.work.left as f32,
+            screen_right: self.screen.work.right as f32,
+            screen_top: self.screen.work.top as f32,
             screen_bottom: self.screen.work.bottom as f32,
+            edge: self.settings.edge,
         };
         if self.log_groups {
             log_info!("opened group {} ({} items)", edit::label_of(&item.cfg), item.children.len());
@@ -3047,6 +3379,7 @@ impl Dock {
             }
         }
         self.window_visible = false;
+        self.lowered = false; // (shown again, it's on top)
         self.tracking_mouse = false;
         if self.drop_zone_shown {
             self.set_drop_zone(false); // nothing left up there catching clicks while out of sight
@@ -3065,6 +3398,7 @@ impl Dock {
     /// the next reveal), Direct2D lets go of what it freed, and the heaps hand back their free
     /// space (see `system::give_back_memory`).
     fn tidy_hidden(&mut self) {
+        self.names = None; // drawn again in a moment when the dock comes back
         self.renderer.settle();
         system::give_back_memory();
     }
@@ -3079,8 +3413,8 @@ impl Dock {
         // Windows can't say where the pointer is while the lock screen or a UAC prompt is up:
         // then it counts as far away, so the dock still goes back up.
         let pt = system::cursor_pos().unwrap_or(POINT { x: -1_000_000, y: -1_000_000 });
-        let top = self.monitor.top;
-        let edge = self.screen.monitor.top; // the screen's own top edge (above a top taskbar)
+        // The screen's own edge (beyond a taskbar on it) and the dock's (see `layout::Place`).
+        let place = self.place();
         // Safety net: the dock thinks a press or a drag is going on, but the button is up (its
         // release never reached the dock). Let go of the mouse, so nothing else is blocked.
         if (self.press.is_some() || self.child_press.is_some() || self.drag.is_some()) && !system::primary_button_down() {
@@ -3100,8 +3434,8 @@ impl Dock {
             // A held mouse button means a drag: a window toward Snap (never reveals the dock), or
             // files, apps or links. For those, an invisible drop zone goes out along the edge, and
             // Windows' drag and drop tells the dock when they arrive. Text drags never do.
-            let at_edge = self.layout.at_reveal_edge(self.win_x, edge, pt.x, pt.y);
-            let near = self.layout.near_edge(self.win_x, edge, top, pt.x, pt.y);
+            let at_edge = self.layout.at_reveal_edge(&place, pt.x, pt.y);
+            let near = self.layout.near_edge(&place, pt.x, pt.y);
             // Buttons are only asked about near the edge, or while the zone is out (it's not free).
             let buttons = (near || self.drop_zone_shown) && system::mouse_buttons_down();
             let held = near && buttons;
@@ -3115,8 +3449,10 @@ impl Dock {
             let waited = self.zone_since.is_some_and(|since| now - since >= Duration::from_millis(100));
             if self.drop_zone_shown && at_edge && held && waited && !self.zone_nudged && self.incoming.is_none() {
                 self.zone_nudged = true;
+                let (along, away, _) = place.locate(pt.x, pt.y);
+                let (x, y) = place.point(along, away + 1); // a pixel in from the edge
                 unsafe {
-                    let _ = SetCursorPos(pt.x, pt.y + 1);
+                    let _ = SetCursorPos(x, y);
                     let _ = SetCursorPos(pt.x, pt.y);
                 }
             }
@@ -3124,6 +3460,13 @@ impl Dock {
             let delay = Duration::from_millis(self.settings.popup_delay_ms);
             if self.edge.update(at_edge, now, delay) && !self.fullscreen_in_front() {
                 self.show();
+            }
+            // Staying out, but sent away by a full-screen program: back once it's gone.
+            if self.stays_out() && self.reveal_target < 0.5 && self.come_back_looked.is_none_or(|at| now - at >= COME_BACK_EVERY) {
+                self.come_back_looked = Some(now);
+                if !self.fullscreen_in_front() {
+                    self.apply_staying_out();
+                }
             }
             // Quick checks near the edge, and while any button is held (a drag may be on its way up).
             let quick = near || self.drop_zone_shown || system::mouse_buttons_down();
@@ -3134,11 +3477,27 @@ impl Dock {
                 self.set_drop_zone(false);
             }
             let busy = self.menu_open || self.drag.is_some() || self.press.is_some() || self.child_press.is_some() || self.incoming.is_some() || self.group.is_some();
-            if !busy && self.fullscreen_in_front() {
+            // (Staying out and resting, it looks for a full-screen program once a second, not at
+            // every check: it's out for hours.)
+            let resting = self.stays_out() && self.resting;
+            let look = !resting || self.come_back_looked.is_none_or(|at| now - at >= COME_BACK_EVERY);
+            if look && resting {
+                self.come_back_looked = Some(now);
+            }
+            if !busy && look && self.fullscreen_in_front() {
                 self.hide();
                 return None;
             }
-            let over = self.layout.pointer_over(self.win_x, edge, top, pt.x, pt.y);
+            // (Under other windows, the pointer is over the dock only where the dock shows.)
+            let over = self.layout.pointer_over(&place, pt.x, pt.y) && (!self.lowered || self.hwnd.is_some_and(|hwnd| system::window_under(pt, hwnd)));
+            // Staying out behind windows: resting the pointer at the edge brings it over them
+            // (as coming out does; never for a window dragged up there).
+            if self.lowered {
+                let at_edge = self.layout.at_reveal_edge(&place, pt.x, pt.y) && !system::window_being_moved();
+                if self.edge.update(at_edge, now, Duration::from_millis(self.settings.popup_delay_ms)) {
+                    self.raise();
+                }
+            }
             // An open group never has the keyboard focus, so the dock looks: Esc, a click
             // anywhere else, or the pointer away from the dock and the pop-up for a moment.
             if self.group.is_some() && !self.menu_open && self.drag.is_none() && self.child_press.is_none() {
@@ -3160,16 +3519,40 @@ impl Dock {
             let lingering = self.linger_until.is_some_and(|until| now < until);
             if lingering && !busy && system::escape_pressed() {
                 self.linger_until = None;
-                self.hide();
+                if self.stays_out() {
+                    self.rest();
+                } else {
+                    self.hide();
+                }
                 return None;
             }
             let away = !(over || lingering || busy);
-            if self.leave.update(away, now, Duration::from_millis(self.settings.hide_delay_ms)) {
+            let left = self.leave.update(away, now, Duration::from_millis(self.settings.hide_delay_ms));
+            if self.stays_out() {
+                // In use again, or resting once the pointer has been away a moment.
+                if !away && self.resting {
+                    self.resting = false;
+                    self.stop_timer(TIMER_REST_TIDY);
+                } else if left && !self.resting {
+                    self.rest();
+                }
+            } else if left {
                 self.hide();
             }
             // During a drag, and while out for the shortcut, Esc counts: looked for often enough
             // to see a quick tap while it's down (Windows' "was pressed" note isn't reliable).
-            self.set_poll(if self.drag.is_some() || lingering { 16 } else if self.group.is_some() { 25 } else { 50 });
+            // Resting while staying out, it's as quiet as when hidden (quick near the edge,
+            // behind windows, so resting the pointer there is seen on time).
+            let near = self.layout.near_edge(&place, pt.x, pt.y);
+            self.set_poll(if self.drag.is_some() || lingering {
+                16
+            } else if self.group.is_some() {
+                25
+            } else if self.stays_out() && self.resting {
+                if self.lowered && near { 16 } else { 100 }
+            } else {
+                50
+            });
         }
         None
     }
@@ -3231,14 +3614,16 @@ impl Dock {
     /// The separator under the pointer (a mouse message's position), if any.
     fn separator_at(&self, lparam: LPARAM) -> Option<usize> {
         let (x, y) = point_from_lparam(lparam);
-        self.layout.separator_at(x as f32, y as f32)
+        let (along, away) = self.layout.geo.frame().from_window(x as f32, y as f32);
+        self.layout.separator_at(along, away)
     }
 
     /// A click on the undo strip (anywhere on it: it's small, and it only does one thing).
     fn strip_hit(&self, lparam: LPARAM) -> bool {
         let Some(strip) = self.strip.as_ref().filter(|strip| strip.undo_rect.is_some()) else { return false };
         let (x, y) = point_from_lparam(lparam);
-        let (x, y) = (x as f32, y as f32 - self.content_offset());
+        let (shift_x, shift_y) = self.layout.geo.frame().shift(self.content_offset());
+        let (x, y) = (x as f32 - shift_x, y as f32 - shift_y);
         x >= strip.rect.left && x < strip.rect.right && y >= strip.rect.top && y < strip.rect.bottom
     }
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> (Option<LRESULT>, Option<Action>) {
@@ -3259,7 +3644,8 @@ impl Dock {
                     self.show_notice(LOCKED_ICON_NOTICE);
                 } else {
                     let (x, y) = point_from_lparam(lparam);
-                    self.on_mouse_move(x as f32, y as f32);
+                    let (along, away) = self.layout.geo.frame().from_window(x as f32, y as f32);
+                    self.on_mouse_move(along, away);
                 }
                 (done, None)
             }
@@ -3364,6 +3750,36 @@ impl Dock {
                 self.welcome();
                 (done, None)
             }
+            WM_TIMER if wparam.0 == TIMER_UPDATES => {
+                self.check_for_updates();
+                (done, None)
+            }
+            WM_APP_UPDATES_CHECKED => {
+                self.tell_about_update();
+                (done, None)
+            }
+            WM_TIMER if wparam.0 == TIMER_UPDATE_TELL => {
+                self.stop_timer(TIMER_UPDATE_TELL);
+                self.tell_about_update();
+                (done, None)
+            }
+            WM_TIMER if wparam.0 == TIMER_REST_TIDY => {
+                self.stop_timer(TIMER_REST_TIDY);
+                if self.resting && self.window_visible {
+                    // Staying out, it never hides: what waits for that (icons tried again, an
+                    // item that's back, an updated program's icon) happens now, while nobody's
+                    // using it, and the next looks are taken (as coming out does).
+                    self.refresh_hidden();
+                    self.recheck_missing(false);
+                    self.check_icon_stamps(false);
+                }
+                // Still resting, nothing moving: as tidy as when hidden. Windows keeps the
+                // picture on screen; the next frame makes a new buffer.
+                if self.resting && self.window_visible && !self.needs_frames() {
+                    self.tidy_hidden();
+                }
+                (done, None)
+            }
             WM_TIMER if wparam.0 == TIMER_STRIP => {
                 self.stop_timer(TIMER_STRIP);
                 self.undo = None; // from now on, Put back
@@ -3442,8 +3858,8 @@ impl Dock {
                 let g = self.layout.geo;
                 for slot in &self.layout.slots {
                     let item = &self.items[slot.item];
-                    let x = self.win_x + slot.center(&g).round() as i32;
-                    let y = self.monitor.top + (g.pad_top + g.icon / 2.0).round() as i32;
+                    let (x, y) = self.out_on_screen(slot.center(&g).round(), (g.pad_top + g.icon / 2.0).round());
+                    let (x, y) = (x.round() as i32, y.round() as i32);
                     if slot.separator {
                         log_info!("TEST where: separator {} at {x},{y} kind Separator takes drops false", slot.item);
                         continue;
@@ -3670,16 +4086,64 @@ impl Dock {
         // Fail soft: a failed frame is skipped; the next one tries again.
         if self.draw().is_ok() {
             if let Some(hwnd) = self.hwnd {
-                let _ = self.renderer.present(hwnd, self.win_x, self.window_y());
+                let (x, y) = self.origin();
+                let _ = self.renderer.present(hwnd, x, y);
             }
         }
     }
 
-    /// Where the window's top edge goes. When sliding by moving the window, it rises past the
-    /// screen edge as `reveal` goes to 0; otherwise it stays put and the drawing slides instead.
-    fn window_y(&self) -> i32 {
+    /// Where the window's top-left corner goes on the screen. When sliding by moving the window, it
+    /// passes beyond the screen edge as `reveal` goes to 0; otherwise it stays put and the drawing
+    /// slides instead. It sits against the work area's edge (beside a taskbar on that edge).
+    fn origin(&self) -> (i32, i32) {
         let offset = if self.slide_by_moving { self.layout.geo.slide_offset(self.reveal) as i32 } else { 0 };
-        self.monitor.top + offset
+        self.origin_at(offset)
+    }
+
+    /// The window's top-left on the screen when slid `offset` pixels away from its edge's inside
+    /// (0: all the way out).
+    fn origin_at(&self, offset: i32) -> (i32, i32) {
+        let (width, height) = self.layout.geo.window_size();
+        let work = self.screen.work;
+        match self.settings.edge {
+            Edge::Top => (self.win_x, work.top + offset),
+            Edge::Bottom => (self.win_x, work.bottom - height - offset),
+            Edge::Left => (work.left + offset, self.win_x),
+            Edge::Right => (work.right - width - offset, self.win_x),
+        }
+    }
+
+    /// Where the dock is on the screen, for the pointer (see `layout::Place`).
+    fn place(&self) -> layout::Place {
+        let (monitor, work) = (self.screen.monitor, self.screen.work);
+        let (screen_edge, dock_edge) = match self.settings.edge {
+            Edge::Top => (monitor.top, work.top),
+            Edge::Bottom => (monitor.bottom - 1, work.bottom - 1),
+            Edge::Left => (monitor.left, work.left),
+            Edge::Right => (monitor.right - 1, work.right - 1),
+        };
+        layout::Place { edge: self.settings.edge, start: self.win_x, screen_edge, dock_edge }
+    }
+
+    /// A point in the window (from a mouse message) in the dock's own directions (along, away),
+    /// as laid out: the slide drawn into it taken back out.
+    fn from_window(&self, x: i32, y: i32) -> (f32, f32) {
+        let (along, away) = self.layout.geo.frame().from_window(x as f32, y as f32);
+        (along, away - self.content_offset())
+    }
+
+    /// A point on the screen in the dock's own directions (along, away), as laid out.
+    fn from_screen(&self, x: i32, y: i32) -> (f32, f32) {
+        let (left, top) = self.origin();
+        self.from_window(x - left, y - top)
+    }
+
+    /// A point in the dock's own directions on the screen, where it is when the dock is all the
+    /// way out (wherever it is now).
+    fn out_on_screen(&self, along: f32, away: f32) -> (f32, f32) {
+        let (left, top) = self.origin_at(0);
+        let (x, y, _, _) = self.layout.geo.frame().rect(along, away, along, away);
+        (left as f32 + x, top as f32 + y)
     }
 
     /// How far the drawing itself is shifted up, when sliding by drawing (see `slide_by_moving`).
@@ -3690,8 +4154,9 @@ impl Dock {
     /// Slides the already-drawn dock by moving its window: no redraw at all.
     fn move_window(&self) {
         if let Some(hwnd) = self.hwnd {
+            let (x, y) = self.origin();
             unsafe {
-                let _ = SetWindowPos(hwnd, None, self.win_x, self.window_y(), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
     }
@@ -3730,7 +4195,55 @@ impl Dock {
         Some(mask)
     }
 
+    /// Every icon's name, drawn once into one picture (see `Names`): a thin dark outline keeps
+    /// the white text readable on any wallpaper, as under the icon you point at.
+    fn names_picture(&mut self) -> Option<Names> {
+        let g = self.layout.geo;
+        // A cell per name: under the icons, as wide as a slot; on a side, a line as long as the
+        // room beside them, aligned toward the icon.
+        let (format, cell_w) = if g.edge.is_side() {
+            (self.side_format.clone()?, g.label_w.floor().max(8.0))
+        } else {
+            (self.names_format.clone()?, (g.icon + g.gap).floor().max(8.0))
+        };
+        let cell_h = g.label_h + 2.0;
+        let mut cell_of = vec![None; self.items.len()];
+        let mut labels: Vec<&[u16]> = Vec::new();
+        for slot in self.layout.slots.iter().filter(|slot| !slot.separator) {
+            cell_of[slot.item] = Some(labels.len());
+            labels.push(&self.items[slot.item].label);
+        }
+        if labels.is_empty() {
+            return None;
+        }
+        let brush = self.brush.clone();
+        let width = (cell_w * labels.len() as f32) as i32;
+        let picture = self.renderer.picture(width, cell_h as i32, |rt| unsafe {
+            for (k, text) in labels.iter().enumerate() {
+                let x = k as f32 * cell_w;
+                let area = rect(x + 1.0, 1.0, x + cell_w - 1.0, 1.0 + g.label_h);
+                brush.SetColor(&rgba(0.0, 0.0, 0.0, 0.55));
+                for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                    let shifted = rect(area.left + dx, area.top + dy, area.right + dx, area.bottom + dy);
+                    rt.DrawText(text, &format, &shifted, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+                brush.SetColor(&rgba(1.0, 1.0, 1.0, 1.0));
+                rt.DrawText(text, &format, &area, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        });
+        match picture {
+            Ok(picture) => Some(Names { picture, cell_w, cell_h, cell_of }),
+            Err(e) => {
+                log_warn!("couldn't draw the names under the icons: {e}");
+                None
+            }
+        }
+    }
+
     fn draw(&mut self) -> Result<()> {
+        if self.settings.show_labels && self.settings.always_show_labels && self.names.is_none() {
+            self.names = self.names_picture();
+        }
         let g = self.layout.geo;
         // The glows this frame (behind the icons under the pointer, or pulsing after a click).
         let mut glows = Vec::new();
@@ -3741,49 +4254,75 @@ impl Dock {
             }
         }
         let glow_mask = if glows.is_empty() { None } else { self.glow_mask() };
-        self.renderer.begin(g.win_w, g.win_h)?;
+        let (width, height) = g.window_size();
+        self.renderer.begin(width, height)?;
         let rt = self.renderer.rt.clone();
         let brush = &self.brush;
         let no_stroke = None::<&ID2D1StrokeStyle>;
         unsafe {
-            // Slide by drawing (only when another monitor sits above, see `slide_by_moving`):
-            // everything moves up past the screen edge as `reveal` goes to 0.
+            // Slide by drawing (when another screen sits beyond the edge, or a taskbar on it; see
+            // `slide_by_moving`): everything moves past the screen edge as `reveal` goes to 0.
             let content_offset = self.content_offset();
-            rt.SetTransform(&translate(0.0, content_offset));
+            let (shift_x, shift_y) = g.frame().shift(content_offset);
+            rt.SetTransform(&translate(shift_x, shift_y));
+            // Everything below is laid out in the dock's own directions (along the edge, away from
+            // it) and placed for its edge (see `layout::Frame`): never turned, always upright.
+            let frame = g.frame();
+            let at = |l: f32, t: f32, r: f32, b: f32| {
+                let (l, t, r, b) = frame.rect(l, t, r, b);
+                rect(l, t, r, b)
+            };
+            let round_at = |l: f32, t: f32, r: f32, b: f32, radius: f32| {
+                let (l, t, r, b) = frame.rect(l, t, r, b);
+                rounded(l, t, r, b, radius)
+            };
 
             let (left, right, bottom) = (g.panel_left, g.panel_left + g.panel_w, g.panel_h);
-            // The top edge sits above the screen, so only the bottom corners show rounded.
-            let top = -g.radius - g.shadow - 2.0;
+            // Hanging from the edge, the panel's edge side sits beyond the screen, so only the far
+            // corners show rounded; a floating one shows all four.
+            let floating = g.panel_top > 0.0;
+            let top = if floating { g.panel_top } else { -g.radius - g.shadow - 2.0 };
+            let skin = self.skin;
+            let colour = |Rgba(r, gr, b, a): Rgba, times: f32| rgba(r, gr, b, a * times);
 
-            // Soft shadow: 1 px rings fading out, matching CrystalXP's ~38% falloff. The shadow,
-            // fill and edge all follow the background opacity setting.
+            // Soft shadow: 1 px rings fading out (CrystalXP's falloff, at the style's strength).
+            // The shadow, fill and edge all follow the background opacity setting.
             let solid = self.settings.background_opacity as f32 / 100.0;
             let rings = if solid > 0.0 { g.shadow as i32 } else { 0 };
             for d in 1..=rings {
                 let t = (d as f32 - 0.5) / g.shadow;
-                brush.SetColor(&rgba(0.0, 0.0, 0.0, 0.38 * (1.0 - t) * (1.0 - t) * solid));
+                brush.SetColor(&rgba(0.0, 0.0, 0.0, skin.shadow * (1.0 - t) * (1.0 - t) * solid));
                 let grow = d as f32 - 0.5;
+                let ring_top = if floating { top - grow } else { top };
                 rt.DrawRoundedRectangle(
-                    &rounded(left - grow, top, right + grow, bottom + grow, g.radius + grow),
+                    &round_at(left - grow, ring_top, right + grow, bottom + grow, g.radius + grow),
                     brush,
                     1.0,
                     no_stroke,
                 );
             }
             if let Some(fill) = &self.fill {
-                rt.FillRoundedRectangle(&rounded(left, top, right, bottom, g.radius), fill);
+                rt.FillRoundedRectangle(&round_at(left, top, right, bottom, g.radius), fill);
             }
-            let (edge, divider) = match self.settings.look {
-                DockLook::Light => (0.72, 0.51),
-                DockLook::Dark => (0.28, 0.30),
-            };
-            brush.SetColor(&rgba(1.0, 1.0, 1.0, edge * solid));
+            brush.SetColor(&colour(skin.edge, solid));
+            let edge_top = if floating { top + 0.5 } else { top };
             rt.DrawRoundedRectangle(
-                &rounded(left + 0.5, top, right - 0.5, bottom - 0.5, g.radius - 0.5),
+                &round_at(left + 0.5, edge_top, right - 0.5, bottom - 0.5, g.radius - 0.5),
                 brush,
                 1.0,
                 no_stroke,
             );
+            if let Some(inner) = skin.inner_edge {
+                // Glass: a fainter line just inside, so the rim catches the light.
+                brush.SetColor(&colour(inner, solid));
+                let inner_top = if floating { top + 1.5 } else { top };
+                rt.DrawRoundedRectangle(
+                    &round_at(left + 1.5, inner_top, right - 1.5, bottom - 1.5, (g.radius - 1.5).max(0.0)),
+                    brush,
+                    1.0,
+                    no_stroke,
+                );
+            }
 
             let inset = (4.0 * g.scale).round();
             let icon_opacity = self.settings.icon_opacity as f32 / 100.0;
@@ -3796,17 +4335,14 @@ impl Dock {
                 }
                 if slot.separator {
                     let x = (slot.center(&g) + self.items[slot.item].shift).floor();
-                    brush.SetColor(&rgba(1.0, 1.0, 1.0, divider));
-                    rt.FillRectangle(&rect(x, inset, x + 1.0, g.panel_h - inset), brush);
+                    brush.SetColor(&colour(skin.divider, 1.0));
+                    rt.FillRectangle(&at(x, g.panel_top + inset, x + 1.0, g.panel_h - inset), brush);
                 } else {
                     icons.push(slot);
                 }
             }
             // Glows go under every icon, so a glow never tints the icon beside it.
-            let peak = match self.settings.look {
-                DockLook::Light => 0.6,
-                DockLook::Dark => 0.7,
-            };
+            let peak = skin.glow_peak;
             if let Some(mask) = &glow_mask {
                 // Drawing through a mask needs aliased mode (the mask's own edges are soft).
                 rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
@@ -3818,7 +4354,7 @@ impl Dock {
                     // Out to about a third of the icon past its edge; a pulse reaches a little further.
                     let radius = size * (0.85 + 0.12 * item.pulse());
                     brush.SetColor(&rgba(r, gr, b, peak * strength));
-                    let area = D2D_RECT_F { left: cx - radius, top: cy - radius, right: cx + radius, bottom: cy + radius };
+                    let area = at(cx - radius, cy - radius, cx + radius, cy + radius);
                     rt.FillOpacityMask(mask, brush, D2D1_OPACITY_MASK_CONTENT_GRAPHICS, Some(&area), None);
                 }
                 rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -3830,12 +4366,12 @@ impl Dock {
                 let item = &self.items[slot.item];
                 let (x, y, size) = layout::icon_rect(&g, slot, item.hover_t, item.bounce(g.bounce));
                 let x = x + item.shake(6.0 * g.scale) + item.shift;
-                let dest = rect(x, y, x + size, y + size);
+                let dest = at(x, y, x + size, y + size);
                 if into == Some(slot.item) {
                     // The group a dragged icon would go into lights up.
                     let m = 5.0 * g.scale;
                     brush.SetColor(&rgba(0.55, 0.78, 1.0, 0.55));
-                    rt.FillRoundedRectangle(&rounded(x - m, y - m, x + size + m, y + size + m, size * 0.25), brush);
+                    rt.FillRoundedRectangle(&round_at(x - m, y - m, x + size + m, y + size + m, size * 0.25), brush);
                 }
                 if item.shows_preview() {
                     let opacity = icon_opacity + (1.0 - icon_opacity) * item.hover_t;
@@ -3854,7 +4390,7 @@ impl Dock {
                     }
                     None => {
                         brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.35));
-                        rt.FillRoundedRectangle(&rounded(x, y, x + size, y + size, size * 0.2), brush);
+                        rt.FillRoundedRectangle(&round_at(x, y, x + size, y + size, size * 0.2), brush);
                     }
                 }
             }
@@ -3867,22 +4403,73 @@ impl Dock {
                 .as_ref()
                 .and_then(|incoming| incoming.onto.map(|index| (index, &incoming.label)))
                 .or(into.zip(into_text.as_ref()));
+            // With names always shown, the one just left keeps its full name while it shrinks back,
+            // fading into its short one.
+            let always = self.settings.show_labels && self.settings.always_show_labels;
+            let shrinking = || {
+                let growing = self.items.iter().enumerate().filter(|(_, item)| item.hover_t > 0.01 && !item.cfg.is_separator());
+                growing.max_by(|a, b| a.1.hover_t.total_cmp(&b.1.hover_t)).map(|(index, _)| index)
+            };
             let shown = match onto {
                 Some((index, text)) => Some((index, text)),
                 None => self
                     .hovered
+                    .or_else(|| if always { shrinking() } else { None })
                     .filter(|_| self.settings.show_labels)
                     .filter(|&index| !self.group.as_ref().is_some_and(|open| open.index == index)) // its pop-up names it
                     .and_then(|index| self.items.get(index).map(|item| (index, &item.label))),
             };
-            if let (Some((index, text)), Some(format)) = (shown, &self.text_format) {
+            // Every icon's name, while names are always shown: from the picture, under the panel,
+            // each fading out while its own icon is pointed at (its full name shows instead) and
+            // dimmed beside it, so that one reads clearly.
+            if let Some(names) = &self.names {
+                // On a side the text itself starts at its cell's edge, so it keeps a gap.
+                let top = if g.edge.is_side() { (g.panel_h + SIDE_TEXT_GAP * g.scale).round() } else { (g.panel_h + 2.0 * g.scale).round() - 1.0 };
+                let open_group = self.group.as_ref().map(|open| open.index);
+                let icons: Vec<&layout::Slot> = self.layout.slots.iter().filter(|slot| !slot.separator).collect();
+                for (k, slot) in icons.iter().enumerate() {
+                    let index = slot.item;
+                    if Some(index) == dragged || Some(index) == open_group || shown.is_some_and(|(i, _)| i == index) {
+                        continue;
+                    }
+                    let Some(cell) = names.cell_of.get(index).copied().flatten() else { continue };
+                    let item = &self.items[index];
+                    let beside = [k.checked_sub(1), Some(k + 1)].into_iter().flatten().filter_map(|n| icons.get(n)).map(|s| self.items[s.item].hover_t).fold(0.0f32, f32::max);
+                    let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside);
+                    if opacity <= 0.01 {
+                        continue;
+                    }
+                    let centre = slot.center(&g) + item.shift + item.shake(6.0 * g.scale);
+                    let source = rect(cell as f32 * names.cell_w, 0.0, (cell + 1) as f32 * names.cell_w, names.cell_h);
+                    // Under (or over) the icons, a cell as wide as a slot; on a side, beside them,
+                    // a line as long as there's room for.
+                    let dest = if g.edge.is_side() {
+                        let start = (centre - names.cell_h / 2.0).round();
+                        at(start, top, start + names.cell_h, top + names.cell_w)
+                    } else {
+                        let left = (centre - names.cell_w / 2.0).round();
+                        at(left, top, left + names.cell_w, top + names.cell_h)
+                    };
+                    rt.DrawBitmap(&names.picture, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&source));
+                }
+            }
+            // (Beside the icon on a side: its own format, from the icon outward, cut short.)
+            let label_format = if g.edge.is_side() { &self.side_format } else { &self.text_format };
+            if let (Some((index, text)), Some(format)) = (shown, label_format) {
                 if let Some(slot) = self.layout.slot_of(index) {
                     let item = &self.items[index];
                     let opacity = item.hover_t;
                     let (_, y, size) = layout::icon_rect(&g, slot, item.hover_t, item.bounce(g.bounce));
                     let cx = slot.center(&g);
-                    let text_top = (y + size + 3.0 * g.scale).round();
-                    let area = rect(cx - 200.0, text_top, cx + 200.0, text_top + g.label_h);
+                    let gap = if g.edge.is_side() { SIDE_TEXT_GAP } else { 3.0 };
+                    let text_top = (y + size + gap * g.scale).round();
+                    let area = if g.edge.is_side() {
+                        // (A line's height even with names off: drop hints still show.)
+                        let line = g.label_h.max((24.0 * self.settings.label_size / 12.5 * g.scale).round());
+                        at(cx - line / 2.0, text_top, cx + line / 2.0, text_top + g.label_w)
+                    } else {
+                        at(cx - 200.0, text_top, cx + 200.0, text_top + g.label_h)
+                    };
                     // A thin dark outline keeps white text readable on any wallpaper.
                     brush.SetColor(&rgba(0.0, 0.0, 0.0, 0.55 * opacity));
                     for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
@@ -3902,7 +4489,10 @@ impl Dock {
                     rect(r.left, top, r.right, top + g.label_h)
                 };
                 brush.SetColor(&rgba(1.0, 1.0, 1.0, 1.0));
-                rt.DrawText(&strip.text, format, &middle(strip.text_rect), brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                match (&self.strip_format, strip.wrapped) {
+                    (Some(lines), true) => rt.DrawText(&strip.text, lines, &strip.text_rect, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL),
+                    _ => rt.DrawText(&strip.text, format, &middle(strip.text_rect), brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL),
+                }
                 if let Some(undo_rect) = strip.undo_rect {
                     brush.SetColor(&rgba(0.52, 0.72, 0.92, 1.0));
                     let undo: Vec<u16> = "Undo".encode_utf16().collect();
@@ -4121,6 +4711,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         /// Recently removed, newest first: id and menu text.
         removed: Vec<(String, String)>,
         locked: bool,
+        auto_hide: bool,
         /// The right-clicked item's kind.
         kind: Option<Kind>,
         has_bin: bool,
@@ -4138,6 +4729,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
             safe_start: dock.mode == Mode::SafeStart,
             editable: dock.mode == Mode::Normal,
             locked: dock.settings.locked,
+            auto_hide: dock.settings.auto_hide,
             kind: picked.map(|(_, it)| it.cfg.kind),
             has_bin: dock.items.iter().any(|it| it.cfg.kind == Kind::RecycleBin),
             groups: dock.items.iter().enumerate().filter(|(_, it)| it.cfg.kind == Kind::Group).map(|(i, it)| (i, edit::label_of(&it.cfg))).collect(),
@@ -4266,6 +4858,8 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         if facts.editable {
             let lock_flags = if facts.locked { MF_STRING | MF_CHECKED } else { MF_STRING };
             item(lock_flags, MENU_LOCK, "Lock icons", &mut open);
+            let hide_flags = if facts.auto_hide { MF_STRING | MF_CHECKED } else { MF_STRING };
+            item(hide_flags, MENU_AUTO_HIDE, "Hide automatically", &mut open);
         }
         item(MF_STRING, MENU_SETTINGS, "Dock settings...", &mut open);
         separate(&mut open);
@@ -4285,6 +4879,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
     let result = match choice {
         MENU_REMOVE => facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.remove_item(*index, label))),
         MENU_LOCK => with_dock(|dock| dock.set_locked(!facts.locked)),
+        MENU_AUTO_HIDE => with_dock(|dock| dock.set_auto_hide(!facts.auto_hide)),
         MENU_NEW_GROUP => facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.new_group(*index, label))),
         MENU_UNGROUP => facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.ungroup(*index, label))),
         _ if choice >= MENU_TO_GROUP && choice < MENU_TO_GROUP + facts.groups.len() => {
@@ -4394,6 +4989,7 @@ pub(crate) fn menu_name(choice: usize) -> Option<&'static str> {
         MENU_EMPTY_BIN => "Empty Recycle Bin",
         MENU_REMOVE => "Remove",
         MENU_LOCK => "Lock icons",
+        MENU_AUTO_HIDE => "Hide automatically",
         MENU_ICON_CHOOSE => "Change icon",
         MENU_ADD_FILES => "Add file",
         MENU_ADD_FOLDER => "Add folder",
@@ -4675,6 +5271,7 @@ pub fn run(opened: store::Opened, store: Store, home: Home, started: Instant, sa
         dock.taskbar_created = system::taskbar_created_message();
         dock.folder_watch = system::watch_folder(&dock.home.dir);
         dock.start_timer(TIMER_HEALTH, HEALTH_EVERY_MS);
+        dock.schedule_update_check(true);
         dock.icons = Some(IconWorker::start(&dock.home, hwnd, WM_APP_ICONS, safe_mode));
         dock.relayout();
         dock.check_recycle_bin();
@@ -5059,6 +5656,13 @@ pub fn snapshot(config: Config, home: Home, dir: &Path) -> Result<()> {
     dock.show_strip("Removed Photoshop");
     dock.draw()?;
     dock.renderer.save_bmp(&dir.join("4-undo-strip.bmp")).map_err(io)?;
+    // A long notice (on a side it goes on several lines).
+    dock.show_notice(LOCKED_ICON_NOTICE);
+    dock.draw()?;
+    dock.renderer.save_bmp(&dir.join("4b-long-notice.bmp")).map_err(io)?;
+    dock.show_strip("Moved Visual Studio Code to Development Tools");
+    dock.draw()?;
+    dock.renderer.save_bmp(&dir.join("4c-long-undo-strip.bmp")).map_err(io)?;
     dock.strip = None;
     if let Some(index) = pick {
         // An icon picked up and held three places along: the others make room.

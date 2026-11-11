@@ -1,2 +1,5 @@
 # RocketDock exports are UTF-16: never convert line endings.
 *.reg binary
+# The manifest goes into the exe byte for byte: the same line endings in every checkout, so a
+# build from any clone gives the same exe as the release.
+assets/desktop-dock.manifest text eol=crlf

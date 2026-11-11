@@ -20,7 +20,7 @@ use windows::Win32::Graphics::DirectWrite::{DWRITE_FACTORY_TYPE_SHARED, DWriteCr
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, HBITMAP,
     HDC, HGDIOBJ, ReleaseDC, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
@@ -230,6 +230,26 @@ impl Renderer {
 
     pub fn end(&mut self) -> Result<()> {
         unsafe { self.rt.EndDraw(None, None) }
+    }
+
+    /// Draws something once into a buffer of its own and keeps it as a bitmap of this render
+    /// target, to be shown in many frames (the names under the icons). Never during a frame.
+    pub fn picture(&mut self, width: i32, height: i32, draw: impl FnOnce(&ID2D1DCRenderTarget)) -> Result<ID2D1Bitmap> {
+        let surface = Surface::new(width.max(1), height.max(1))?;
+        unsafe {
+            self.rt.BindDC(surface.hdc, &RECT { left: 0, top: 0, right: surface.width, bottom: surface.height })?;
+            self.rt.BeginDraw();
+            self.rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            draw(&self.rt);
+            self.rt.EndDraw(None, None)?;
+            let _ = GdiFlush();
+            self.rt.CreateBitmap(
+                D2D_SIZE_U { width: surface.width as u32, height: surface.height as u32 },
+                Some(surface.bits as *const c_void),
+                surface.width as u32 * 4,
+                &D2D1_BITMAP_PROPERTIES { pixelFormat: PIXEL_FORMAT, dpiX: 96.0, dpiY: 96.0 },
+            )
+        }
     }
 
     /// Puts the last frame on screen at (x, y) in physical screen pixels.

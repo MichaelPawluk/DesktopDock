@@ -151,6 +151,11 @@ fn rotate(path: &Path) {
     let _ = std::fs::rename(path, path.with_file_name("dock.old.log"));
 }
 
+/// The time now, to the minute ("2026-11-10 17:02"), as the PC's clock says.
+pub fn now_text() -> String {
+    timestamp()[..16].to_string()
+}
+
 fn timestamp() -> String {
     let t = unsafe { GetLocalTime() };
     format!(
