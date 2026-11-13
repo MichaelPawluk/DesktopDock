@@ -39,6 +39,9 @@ impl Pick {
     }
 }
 
+/// The language the dock speaks, handed to the helper so its chooser speaks it too.
+const LANGUAGE: &str = "DESKTOP_DOCK_LANGUAGE";
+
 // ---- The dock's side ---------------------------------------------------------------------------
 
 /// Shows a chooser in a helper process and waits for it (call from a worker thread: you may take
@@ -47,7 +50,7 @@ pub fn ask(pick: Pick, start: &str) -> Vec<String> {
     let Ok(exe) = std::env::current_exe() else { return Vec::new() };
     let result = std::env::temp_dir().join(format!("desktop-dock-pick-{}-{}.txt", std::process::id(), unique()));
     let mut command = std::process::Command::new(exe);
-    command.arg("--pick").arg(pick.word()).arg(&result);
+    command.arg("--pick").arg(pick.word()).arg(&result).env(LANGUAGE, crate::text::current().code);
     if !start.is_empty() {
         command.arg(start);
     }
@@ -79,6 +82,7 @@ pub fn run_helper(what: &str, result: &Path, start: Option<&str>) -> i32 {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     }
     let Some(pick) = Pick::from_word(what) else { return 2 };
+    crate::text::use_setting(&std::env::var(LANGUAGE).unwrap_or_default());
     let _ = start;
     let chosen: Vec<String> = match pick {
         Pick::Files => choose_files(None),
@@ -114,12 +118,13 @@ fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
 /// A file of one kind to open (`kind`: what the filter says, `pattern`: like "*.toml").
 pub fn choose_file(owner: Option<HWND>, title: &str, kind: &str, pattern: &str) -> Option<String> {
     let start = known_folder(&FOLDERID_Documents);
-    let dialog = dialog(PCWSTR(HSTRING::from(title).as_ptr()), 0, start.as_deref())?;
+    let dialog = dialog(&HSTRING::from(title), 0, start.as_deref())?;
     unsafe {
-        let (kind, pattern) = (HSTRING::from(kind), HSTRING::from(pattern));
+        // (Kept until the dialog has taken its own copy of the names.)
+        let (kind, pattern, all) = (HSTRING::from(kind), HSTRING::from(pattern), wtr!("All files"));
         let filters = [
             COMDLG_FILTERSPEC { pszName: PCWSTR(kind.as_ptr()), pszSpec: PCWSTR(pattern.as_ptr()) },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: w!("*.*") },
         ];
         let _ = dialog.SetFileTypes(&filters);
         dialog.Show(owner).ok()?;
@@ -148,7 +153,7 @@ pub fn choose_save(owner: Option<HWND>, title: &str, name: &str, kind: &str, pat
     }
 }
 
-fn dialog(title: PCWSTR, options: u32, start_folder: Option<&Path>) -> Option<IFileOpenDialog> {
+fn dialog(title: &HSTRING, options: u32, start_folder: Option<&Path>) -> Option<IFileOpenDialog> {
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let current = dialog.GetOptions().ok()?;
@@ -179,11 +184,12 @@ fn path_of(item: &IShellItem) -> Option<String> {
 /// chooser for it, to pick which of its icons. Returns an icon reference (`file` or `file,index`).
 pub fn choose_image(owner: Option<HWND>, start: &str) -> Option<String> {
     let start_folder = Path::new(start).parent().filter(|p| p.is_dir()).map(Path::to_path_buf).or_else(icons_folder);
-    let dialog = dialog(w!("Choose an icon"), 0, start_folder.as_deref())?;
+    let dialog = dialog(&wtr!("Choose an icon"), 0, start_folder.as_deref())?;
     unsafe {
+        let (images, all) = (wtr!("Images and icons"), wtr!("All files"));
         let filters = [
-            COMDLG_FILTERSPEC { pszName: w!("Images and icons"), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.exe;*.dll") },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(images.as_ptr()), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.exe;*.dll") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: w!("*.*") },
         ];
         let _ = dialog.SetFileTypes(&filters);
         dialog.Show(owner).ok()?;
@@ -216,7 +222,7 @@ pub fn choose_program_icon(owner: Option<HWND>, file: &str) -> Option<String> {
 pub fn choose_files(owner: Option<HWND>) -> Vec<String> {
     // The real Desktop, wherever it is (OneDrive moves it, for one).
     let start = known_folder(&FOLDERID_Desktop);
-    let Some(dialog) = dialog(w!("Add to the dock"), FOS_ALLOWMULTISELECT.0, start.as_deref()) else { return Vec::new() };
+    let Some(dialog) = dialog(&wtr!("Add to the dock"), FOS_ALLOWMULTISELECT.0, start.as_deref()) else { return Vec::new() };
     unsafe {
         if dialog.Show(owner).is_err() {
             return Vec::new();
@@ -230,11 +236,11 @@ pub fn choose_files(owner: Option<HWND>) -> Vec<String> {
 /// A folder: to add to the dock, or (with `start`) an item's start-in folder.
 pub fn choose_folder(owner: Option<HWND>, start: &str) -> Option<String> {
     let (title, start) = if start.is_empty() {
-        (w!("Add a folder to the dock"), std::env::var("USERPROFILE").map(PathBuf::from).ok())
+        (wtr!("Add a folder to the dock"), std::env::var("USERPROFILE").map(PathBuf::from).ok())
     } else {
-        (w!("Choose a folder"), Some(PathBuf::from(start)))
+        (wtr!("Choose a folder"), Some(PathBuf::from(start)))
     };
-    let dialog = dialog(title, FOS_PICKFOLDERS.0, start.as_deref())?;
+    let dialog = dialog(&title, FOS_PICKFOLDERS.0, start.as_deref())?;
     unsafe {
         dialog.Show(owner).ok()?;
         path_of(&dialog.GetResult().ok()?)
@@ -243,7 +249,7 @@ pub fn choose_folder(owner: Option<HWND>, start: &str) -> Option<String> {
 
 /// Where to install Desktop Dock (setup's Change...): opens where it's going now.
 pub fn choose_install_folder(owner: Option<HWND>, start: Option<&Path>) -> Option<String> {
-    let dialog = dialog(w!("Choose where to install Desktop Dock"), FOS_PICKFOLDERS.0, start)?;
+    let dialog = dialog(&wtr!("Choose where to install Desktop Dock"), FOS_PICKFOLDERS.0, start)?;
     unsafe {
         dialog.Show(owner).ok()?;
         path_of(&dialog.GetResult().ok()?)
@@ -253,11 +259,12 @@ pub fn choose_install_folder(owner: Option<HWND>, start: Option<&Path>) -> Optio
 /// Any file, for an item's target; opens in the current target's folder.
 pub fn choose_target(owner: Option<HWND>, start: &str) -> Option<String> {
     let folder = Path::new(start).parent().filter(|p| p.is_dir()).map(Path::to_path_buf);
-    let dialog = dialog(w!("Choose what this item opens"), 0, folder.as_deref())?;
+    let dialog = dialog(&wtr!("Choose what this item opens"), 0, folder.as_deref())?;
     unsafe {
+        let (programs, all) = (wtr!("Programs"), wtr!("All files"));
         let filters = [
-            COMDLG_FILTERSPEC { pszName: w!("Programs"), pszSpec: w!("*.exe;*.lnk;*.bat;*.cmd;*.url") },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(programs.as_ptr()), pszSpec: w!("*.exe;*.lnk;*.bat;*.cmd;*.url") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: w!("*.*") },
         ];
         let _ = dialog.SetFileTypes(&filters);
         let lower = start.to_ascii_lowercase();

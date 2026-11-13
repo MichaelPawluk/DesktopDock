@@ -1,6 +1,9 @@
 // Release builds are a normal Windows app with no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// First: its tr!, trn!, wtr! and n! are used everywhere after it.
+#[macro_use]
+mod text;
 mod chrome;
 mod config;
 mod dock;
@@ -86,13 +89,17 @@ fn main() {
             ("--properties", Some(spot)) => settings::Open::Properties(spot),
             _ => settings::Open::Settings(spot),
         };
-        std::process::exit(settings::run(home::locate(explicit_home), open));
+        let home = home::locate(explicit_home);
+        use_language_of(&home.dir);
+        std::process::exit(settings::run(home, open));
     }
     // The update check helper (see update.rs): asks GitHub for the newest version, keeps the
     // answer in the dock folder, exits. The dock runs it once a day when that's ticked, so its
     // own memory never holds Windows' web code. `--check-updates --home <dir>`.
     if let [flag, home_flag, dir] = raw.as_slice() {
         if flag == "--check-updates" && home_flag == "--home" {
+            // (What went wrong is kept for Dock settings to show: in the dock's language.)
+            use_language_of(std::path::Path::new(dir));
             let status = update::check_and_keep(std::path::Path::new(dir));
             std::process::exit(if status.error.is_empty() { 0 } else { 1 });
         }
@@ -107,7 +114,15 @@ fn main() {
     // Downloads shows the setup window and leaves nothing beside it; --install and --uninstall.
     let exe = std::env::current_exe().unwrap_or_default();
     let beside = exe.parent().is_some_and(|dir| dir.join("dock.toml").is_file());
-    match setup::role(&raw, &exe, setup::install_dir().as_deref(), beside, home::is_dev_build()) {
+    let role = setup::role(&raw, &exe, setup::install_dir().as_deref(), beside, home::is_dev_build());
+    if role != setup::Role::Run {
+        // Setup speaks the language of the dock it updates or removes; a new install, Windows' own.
+        match setup::install_dir() {
+            Some(dir) => use_language_of(&dir),
+            None => text::use_setting(""),
+        }
+    }
+    match role {
         setup::Role::Setup => std::process::exit(setup::run_setup_window()),
         setup::Role::Install(options) => std::process::exit(setup::run_install(options)),
         setup::Role::Uninstall { quiet, remove_dock } => std::process::exit(setup::run_uninstall(quiet, remove_dock)),
@@ -157,6 +172,7 @@ fn main() {
         std::process::exit(if system::quit_running_dock() { 0 } else { 1 });
     }
     let home = home::locate(explicit_home);
+    use_language_of(&home.dir);
     // Test-only flags work only in development builds: on an installed copy, --stress-save would
     // overwrite the real dock.toml forever.
     if !home::is_dev_build() {
@@ -192,7 +208,7 @@ fn main() {
         let how = if all_args.iter().any(|arg| arg == system::STARTUP_FLAG) { "Windows started it at sign-in" } else { "started by hand or by setup" };
         log_info!("watchdog starting ({how}); dock folder {}", home.dir.display());
         startup::move_from_run_entry(); // an installed dock from before 1.0.1
-        watchdog::run(&all_args);
+        watchdog::run(&all_args, &home.dir);
     }
     log_info!("starting{}; dock folder {}", if safe_mode { " in safe mode" } else { "" }, home.dir.display());
 
@@ -212,7 +228,7 @@ fn main() {
                 log_info!("first run: created {}", path.display());
                 first_run = true;
             }
-            Err(e) => fatal(&format!("Couldn't create {}: {e}", path.display())),
+            Err(e) => fatal(&tr!("Couldn't create {file}: {why}", file = path.display(), why = e)),
         }
     }
     if bench {
@@ -265,7 +281,7 @@ fn main() {
     let opened = store::open(&store);
     if let Err(e) = dock::run(opened, store, home, started, safe_mode, first_run) {
         log_error!("stopped: {e}");
-        fatal(&format!("Desktop Dock stopped: {e}"));
+        fatal(&tr!("Desktop Dock stopped: {why}", why = e));
     }
     log_info!("exited normally");
 }
@@ -283,22 +299,34 @@ fn import_rocketdock(store: &store::Store, file: Option<&std::path::Path>, quiet
         log_info!("kept the previous dock.toml as {}", pinned.display());
     }
     if let Err(e) = store.replace(&imported.text) {
-        fatal(&format!("Import failed: {e}"));
+        fatal(&tr!("Import failed: {why}", why = e));
     }
     log_info!("imported {} RocketDock entries", imported.items);
     for line in &imported.report {
         log_info!("import: {line}");
     }
     if !quiet {
-        let mut summary = format!("Imported {} RocketDock entries into {}.", imported.items, store.config_path().display());
-        if !imported.report.is_empty() {
-            summary.push_str("\n\nWorth knowing:\n");
-            for line in &imported.report {
-                summary.push_str(&format!("• {line}\n"));
-            }
-        }
+        let file = store.config_path().display();
+        let summary = if imported.report.is_empty() {
+            trn!("Imported {n} RocketDock entry into {file}.", "Imported {n} RocketDock entries into {file}.", imported.items, file = file)
+        } else {
+            let notes: String = imported.report.iter().map(|line| format!("• {line}\n")).collect();
+            trn!(
+                "Imported {n} RocketDock entry into {file}.\n\nWorth knowing:\n{notes}",
+                "Imported {n} RocketDock entries into {file}.\n\nWorth knowing:\n{notes}",
+                imported.items,
+                file = file,
+                notes = notes
+            )
+        };
         system::message_box(&summary, "Desktop Dock", MB_ICONINFORMATION | MB_OK);
     }
+}
+
+/// Speaks the language the dock folder's dock.toml names, or Windows' own (no file, no setting,
+/// or a file that can't be read).
+pub(crate) fn use_language_of(dir: &std::path::Path) {
+    text::use_setting(&config::load(&dir.join("dock.toml")).map(|parsed| parsed.config.dock.language).unwrap_or_default());
 }
 
 /// Test only: saves two different versions back and forth forever, so a script can kill the

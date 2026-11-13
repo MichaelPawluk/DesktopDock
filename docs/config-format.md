@@ -18,7 +18,7 @@ hide_delay_ms = 250
 slide_in_ms = 250
 slide_out_ms = 250
 show_labels = true
-always_show_labels = false # true: every icon's name all the time, not only the one you point at ("…" cuts long ones short)
+always_show_labels = false # true: every icon's name all the time, not only the one you point at (up to two lines; "…" cuts long ones short)
 label_size = 12.5          # name text size, logical pixels (8-24)
 background_opacity = 100   # how solid the panel, its edge and shadow are, in % (0 = icons only)
 icon_opacity = 100         # how solid icons are, in % (10-100); the one under the pointer is always solid
@@ -30,6 +30,7 @@ monitor = "main"           # the screen the dock is on: "main" (Windows' main sc
 hotkey = ""                # a keyboard shortcut that brings the dock out (and sends it back), like "Ctrl+Shift+D": Ctrl and/or Alt, Shift if you like, and one key; "" for none (the default)
 locked = false             # true: no dragging icons around, off, or onto the dock (right-click > Lock icons)
 edge = "top"               # the screen edge it's on: "top", "bottom", "left" or "right" (beside a taskbar on that edge, never over it)
+language = "auto"          # the language it speaks: "auto" (Windows' display language), or "en", "de", "fr", "es", "pt-BR", "ru", "zh-CN", "ja"
 auto_hide = true           # false: the dock stays out when you're not using it (right-click > Hide automatically)
 stay_out = "behind-windows" # how it stays out: "behind-windows" (windows cover it; rest the pointer at the edge to bring it over them) or "on-top"
 check_updates = false      # true: ask GitHub once a day whether there's a newer version (Dock settings > About)

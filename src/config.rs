@@ -63,6 +63,9 @@ pub struct DockSettings {
     pub stay_out: StayOut,
     /// The screen edge the dock is on (Settings > Screen): top (the default), bottom, left or right.
     pub edge: Edge,
+    /// The language the dock speaks (Dock settings > Look > Language): "auto" (the default) for
+    /// Windows' own display language, or one of `text::LANGUAGES`' codes ("de", "pt-BR").
+    pub language: String,
 }
 
 /// A screen edge.
@@ -126,6 +129,7 @@ impl Default for DockSettings {
             auto_hide: true,
             stay_out: StayOut::BehindWindows,
             edge: Edge::Top,
+            language: "auto".into(),
         }
     }
 }
@@ -312,6 +316,7 @@ struct RawDock {
     auto_hide: Option<bool>,
     stay_out: Option<String>,
     edge: Option<String>,
+    language: Option<String>,
     /// Version 0: zoom as a multiple of icon_size.
     hover_scale: Option<f32>,
 }
@@ -321,22 +326,22 @@ pub(crate) const DOCK_KEYS: &[&str] = &[
     "icon_size", "zoom_size", "zoom_ms", "spacing", "popup_delay_ms", "hide_delay_ms",
     "slide_in_ms", "slide_out_ms", "show_labels", "always_show_labels", "label_size", "background_opacity", "icon_opacity",
     "launch_effect", "locked", "look", "style", "hover_glow", "monitor", "hotkey", "check_updates", "auto_hide", "stay_out",
-    "edge", "hover_scale",
+    "edge", "language", "hover_scale",
 ];
 pub(crate) const ITEM_KEYS: &[&str] = &[
     "kind", "name", "target", "app_id", "args", "start_in", "icon", "run", "admin", "items", "separator",
 ];
 
-/// What's said about a file that isn't text the dock can read.
+/// What's said about a file that isn't text the dock can read (in English: said with `text::t`).
 pub const NOT_TEXT: &str =
-    "It isn't saved as UTF-8 text, the kind the dock reads. If you edited it, save it again with the encoding set to UTF-8.";
+    n!("It isn't saved as UTF-8 text, the kind the dock reads. If you edited it, save it again with the encoding set to UTF-8.");
 
 /// Reads a dock file as text: UTF-8, with or without a byte-order mark, or UTF-16 with one
 /// (Notepad's "Unicode", and what Windows PowerShell's `>` writes). Anything else is
-/// `InvalidData`, said in plain words (`NOT_TEXT`).
+/// `InvalidData`, said in plain words (`NOT_TEXT`, in the language in use).
 pub fn read_text(path: &std::path::Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
-    decode(bytes).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, NOT_TEXT))
+    decode(bytes).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, crate::text::t(NOT_TEXT)))
 }
 
 fn decode(bytes: Vec<u8>) -> Option<String> {
@@ -355,8 +360,8 @@ fn decode(bytes: Vec<u8>) -> Option<String> {
 }
 
 pub fn load(path: &std::path::Path) -> Result<Parsed, String> {
-    let text = read_text(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-    parse(&text).map_err(|e| format!("{} has an error:\n\n{e}", path.display()))
+    let text = read_text(path).map_err(|e| tr!("Could not read {file}: {why}", file = path.display(), why = e))?;
+    parse(&text).map_err(|e| tr!("{file} has an error:\n\n{why}", file = path.display(), why = e))
 }
 
 /// Parses config text. Missing values get defaults; out-of-range values are clamped with a
@@ -428,6 +433,18 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         auto_hide: r.auto_hide.unwrap_or(d.auto_hide),
         stay_out: choice("stay_out", r.stay_out.as_deref(), StayOut::NAMES, d.stay_out, &mut warnings),
         edge: choice("edge", r.edge.as_deref(), Edge::NAMES, d.edge, &mut warnings),
+        language: match r.language.as_deref().map(str::trim) {
+            None | Some("") => d.language,
+            Some(word) if word.eq_ignore_ascii_case("auto") => d.language,
+            Some(word) => match crate::text::LANGUAGES.iter().find(|language| language.code.eq_ignore_ascii_case(word)) {
+                Some(language) => language.code.to_string(),
+                None => {
+                    let codes: Vec<&str> = crate::text::LANGUAGES.iter().map(|language| language.code).collect();
+                    warnings.push(format!("[dock] language = \"{word}\" isn't one the dock has ({}, or \"auto\"); using Windows' language", codes.join(", ")));
+                    d.language
+                }
+            },
+        },
     };
 
     let mut items = raw.items;
@@ -794,6 +811,20 @@ icon_opacity = 0");
         assert_eq!((odd.config.dock.edge, odd.config.dock.icon_size), (Edge::Top, 53.0));
         assert_eq!(odd.warnings.len(), 1, "{:?}", odd.warnings);
         assert!(Edge::Left.is_side() && Edge::Right.is_side() && !Edge::Top.is_side() && !Edge::Bottom.is_side());
+    }
+
+    #[test]
+    fn the_language_is_windows_unless_one_the_dock_has_is_chosen() {
+        assert_eq!(ok("version = 1\n[dock]\n").config.dock.language, "auto");
+        assert_eq!(ok("version = 1\n[dock]\nlanguage = \"Auto\"").config.dock.language, "auto");
+        // Any case, kept as the dock writes it.
+        let german = ok("version = 1\n[dock]\nlanguage = \"DE\"");
+        assert_eq!((german.config.dock.language.as_str(), german.warnings.len()), ("de", 0));
+        assert_eq!(ok("version = 1\n[dock]\nlanguage = \"pt-br\"").config.dock.language, "pt-BR");
+        // One it doesn't have: Windows' language, with a warning that names those it has.
+        let odd = ok("version = 1\n[dock]\nlanguage = \"tlh\"");
+        assert_eq!(odd.config.dock.language, "auto");
+        assert!(odd.warnings.len() == 1 && odd.warnings[0].contains("ja"), "{:?}", odd.warnings);
     }
 
     #[test]

@@ -41,10 +41,10 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
-    IDWriteTextFormat,
+    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WHOLE_WORD,
+    DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -123,9 +123,9 @@ const UNREADABLE_TELL_AFTER: Duration = Duration::from_secs(15);
 /// long as the strip; after that, Put back is the way to return a removed item.
 const STRIP_FOR: Duration = Duration::from_secs(6);
 /// Shown when a drag meets a locked dock.
-const LOCKED_NOTICE: &str = "Icons are locked (right-click > Lock icons to unlock)";
+const LOCKED_NOTICE: &str = n!("Icons are locked (right-click > Lock icons to unlock)");
 /// Shown when one of the dock's own icons is dragged while locked.
-const LOCKED_ICON_NOTICE: &str = "Icons are locked (hold Ctrl to move one, or right-click > Lock icons to unlock)";
+const LOCKED_ICON_NOTICE: &str = n!("Icons are locked (hold Ctrl to move one, or right-click > Lock icons to unlock)");
 /// After a drop into a group's pop-up it stays this long, so you see where the icon landed...
 const SETTLE_HOLD: Duration = Duration::from_millis(600);
 /// ...and a closing pop-up fades out over this long (at once with Windows' animations off).
@@ -138,8 +138,8 @@ const GROUP_HOLD: Duration = Duration::from_secs(1);
 const PREVIEW_FRACTION: f32 = 0.36;
 /// Held over a group while dragging an icon, it springs open to place the icon exactly.
 const SPRING_OPEN: Duration = Duration::from_millis(600);
-/// What right-click → New group calls it (rename it in Properties).
-const NEW_GROUP_NAME: &str = "New group";
+/// What right-click → New group calls it (rename it in Properties), in the language in use.
+const NEW_GROUP_NAME: &str = n!("New group");
 /// Changes like these often come in bursts; one recheck runs once they've settled.
 const RECHECK_DELAY_MS: u32 = 3000;
 /// dock.toml is reloaded once its date stays the same this long (an editor may still be writing).
@@ -312,7 +312,7 @@ impl Item {
             .iter()
             .map(|child| Child {
                 cfg: child.clone(),
-                label: edit::label_of(child).encode_utf16().collect(),
+                label: edit::shown_label_of(child).encode_utf16().collect(),
                 sources: Vec::new(),
                 icon: None,
                 preview: None,
@@ -635,7 +635,7 @@ struct Strip {
 }
 
 /// Every icon's name drawn once, side by side in one picture, each in a cell as wide as an
-/// icon's slot and cut short with "…" to fit it (while names are always shown).
+/// icon's slot, on up to two lines, cut short with "…" past them (while names are always shown).
 struct Names {
     picture: ID2D1Bitmap,
     cell_w: f32,
@@ -923,7 +923,15 @@ impl Dock {
             self.popup_format = make(DWRITE_FONT_WEIGHT_NORMAL, size, true, true); // two lines, then "…"
             self.popup_wrap_format = make(DWRITE_FONT_WEIGHT_NORMAL, size, true, false);
             self.popup_title_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size + 1.5 * g.scale, false, true);
-            self.names_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, false, true);
+            // Every icon's name under it: its lines (`layout::NAME_LINES`), broken between words,
+            // then "…" (a single word too long for the slot is cut short, not broken). On the
+            // bottom edge the names are over the panel: they keep to the panel's side.
+            self.names_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, true, true).inspect(|format| {
+                let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_WHOLE_WORD);
+                if g.edge == Edge::Bottom {
+                    let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_FAR);
+                }
+            });
             // On a side, names beside the icons: from the icon outward, centred on it, cut short.
             self.side_format = make(DWRITE_FONT_WEIGHT_SEMI_BOLD, size, false, true).inspect(|format| {
                 let _ = format.SetTextAlignment(if g.edge == Edge::Right { DWRITE_TEXT_ALIGNMENT_TRAILING } else { DWRITE_TEXT_ALIGNMENT_LEADING });
@@ -1225,7 +1233,7 @@ impl Dock {
         self.missing_children = report.missing.iter().filter_map(|spot| spot.child.map(|child| (spot.index, child))).collect();
         for &index in &self.missing {
             let item = &mut self.items[index];
-            item.label = format!("{} (not found)", item.cfg.name).encode_utf16().collect();
+            item.label = tr!("{name} (not found)", name = item.cfg.name).encode_utf16().collect();
         }
         if !self.missing.is_empty() {
             self.names = None; // drawn again with "(not found)"
@@ -1233,12 +1241,11 @@ impl Dock {
         // Each program is mentioned once per session, however often it's repaired.
         let news: Vec<&heal::Fix> = report.fixed.iter().filter(|fix| self.repairs_told.insert(fix.name.to_lowercase())).collect();
         if !news.is_empty() {
-            let mut text = String::from("Some programs moved when they were updated, so the dock now opens them from their new folders:\n\n");
-            for fix in news {
-                text.push_str(&format!("• {}\n", fix.line));
-            }
-            text.push_str("\nYour dock as it was is kept in Dock settings > Versions.");
-            system::notice(text);
+            let programs: String = news.iter().map(|fix| format!("• {}\n", fix.line)).collect();
+            system::notice(tr!(
+                "Some programs moved when they were updated, so the dock now opens them from their new folders:\n\n{programs}\nYour dock as it was is kept in Dock settings > Versions.",
+                programs = programs
+            ));
         }
         if self.window_visible {
             self.render();
@@ -1621,18 +1628,16 @@ impl Dock {
                 self.unreadable_told = true;
                 log_warn!("dock.toml still can't be read ({e})");
                 return Err(self.start_notice.take().unwrap_or_else(|| {
-                    format!(
-                        "Your dock's file can't be opened right now: {e}\n\nAnother program may be using it. The dock \
-                         keeps its current setup and switches to your changes as soon as the file can be read."
+                    tr!(
+                        "Your dock's file can't be opened right now: {error}\n\nAnother program may be using it. The dock keeps its current setup and switches to your changes as soon as the file can be read.",
+                        error = e
                     )
                 }));
             }
             Err(e) => {
                 self.read_retries = 0;
                 self.watch.loaded(stamp); // reported once, not every second
-                return Err(format!(
-                    "Your dock's file couldn't be read. {e}\n\nThe dock keeps its current setup until the file is fixed."
-                ));
+                return Err(tr!("Your dock's file couldn't be read. {error}\n\nThe dock keeps its current setup until the file is fixed.", error = e));
             }
         };
         if self.unreadable_since.take().is_some() {
@@ -1646,13 +1651,13 @@ impl Dock {
         self.loaded_text = Some(fingerprint(&text));
         if text.trim().is_empty() {
             log_warn!("dock.toml is empty; keeping the current setup");
-            return Err(format!(
-                "{} is empty, so the dock keeps your items as they are. It reads the file again once it has items in it (Dock settings > Versions has your recent versions).",
-                path.display()
+            return Err(tr!(
+                "{file} is empty, so the dock keeps your items as they are. It reads the file again once it has items in it (Dock settings > Versions has your recent versions).",
+                file = path.display()
             ));
         }
         let parsed = config::parse(&text)
-            .map_err(|e| format!("{} has an error:\n\n{e}\n\nThe dock keeps its current setup until the file is fixed.", path.display()))
+            .map_err(|e| tr!("{file} has an error:\n\n{error}\n\nThe dock keeps its current setup until the file is fixed.", file = path.display(), error = e))
             .inspect_err(|e| log_warn!("reload failed: {e}"))?;
         for warning in &parsed.warnings {
             log_warn!("dock.toml: {warning}");
@@ -1671,6 +1676,7 @@ impl Dock {
         let checking_was = self.settings.check_updates;
         let staying_was = (self.settings.auto_hide, self.settings.stay_out);
         self.settings = config.dock;
+        crate::text::use_setting(&self.settings.language); // (its menus and messages: from now on)
         self.apply_hotkey();
         if self.settings.check_updates != checking_was {
             self.schedule_update_check(true);
@@ -1694,8 +1700,8 @@ impl Dock {
     /// "Restore last working version": keeps the broken file as a pinned backup, then puts
     /// last-good back and reloads it.
     fn restore_last_good(&mut self) -> std::result::Result<(), String> {
-        let store = self.store.clone().ok_or("There's nothing to restore.")?;
-        let good = store.last_good().ok_or("There's no earlier working version to restore.")?;
+        let store = self.store.clone().ok_or(tr!("There's nothing to restore."))?;
+        let good = store.last_good().ok_or(tr!("There's no earlier working version to restore."))?;
         if let Some(kept) = store.pin("broken") {
             log_info!("kept the broken dock.toml as {}", kept.display());
         }
@@ -1710,33 +1716,57 @@ impl Dock {
     fn editable(&self) -> std::result::Result<(Store, Removed), String> {
         match self.mode {
             Mode::Normal => {}
-            Mode::ReadOnly => return Err("Your dock was saved by a newer Desktop Dock, so this one can't change it.".into()),
-            Mode::SafeStart => return Err("Your dock's file can't be read right now, so it can't be changed. Fix the file, or right-click the dock > Restore last working version.".into()),
+            Mode::ReadOnly => return Err(tr!("Your dock was saved by a newer Desktop Dock, so this one can't change it.").into()),
+            Mode::SafeStart => return Err(tr!("Your dock's file can't be read right now, so it can't be changed. Fix the file, or right-click the dock > Restore last working version.").into()),
         }
         match (&self.store, &self.removed) {
             (Some(store), Some(removed)) => Ok((store.clone(), removed.clone())),
-            _ => Err("This copy of the dock can't change your dock.".into()),
+            _ => Err(tr!("This copy of the dock can't change your dock.").into()),
         }
+    }
+
+    /// The item at `spot` as loaded.
+    fn cfg_at(&self, spot: Spot) -> Option<&ItemConfig> {
+        let item = self.items.get(spot.index)?;
+        match spot.child {
+            None => Some(&item.cfg),
+            Some(child) => item.children.get(child).map(|child| &child.cfg),
+        }
+    }
+
+    /// What the item at `spot` is called where people see it (its name, or what kind of thing it
+    /// is in the language in use), if it's still the one called `expect`; otherwise `expect`.
+    fn shown_as(&self, spot: Spot, expect: &str) -> String {
+        match self.cfg_at(spot) {
+            Some(cfg) if edit::label_of(cfg) == expect => edit::shown_label_of(cfg),
+            _ => expect.to_string(),
+        }
+    }
+
+    /// What the item at `spot` is called where people see it.
+    fn shown_at(&self, spot: Spot) -> String {
+        self.cfg_at(spot).map(edit::shown_label_of).unwrap_or_default()
     }
 
     /// Takes an item off the dock. Nothing is lost: Undo on the strip that appears puts it straight
     /// back, and afterwards it's in Recently removed (right-click → Put back).
     fn remove_item(&mut self, index: usize, expect: &str) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
-        let label = edit::label_of(&self.items.get(index).ok_or("That item isn't there any more.")?.cfg);
+        let label = edit::label_of(&self.items.get(index).ok_or(tr!("That item isn't there any more."))?.cfg);
         if label != expect {
-            return Err(format!("The dock changed while the menu was open ({expect} has moved), so nothing was done. Try again."));
+            return Err(tr!("The dock changed while the menu was open ({name} has moved), so nothing was done. Try again.", name = expect));
         }
+        let shown = self.shown_at(Spot::dock(index));
         let (table, change) = store.change(|doc| edit::remove(doc, Spot::dock(index), &label))?;
         let removed_id = removed.add(&table, index, None).inspect_err(|e| log_warn!("Recently removed: {e}")).ok();
         log_info!("removed {label}");
-        self.show_change(UndoStep { what: format!("remove {label}"), change, removed_id, put_back: None }, format!("Removed {label}"))
+        self.show_change(UndoStep { what: format!("remove {label}"), change, removed_id, put_back: None }, tr!("Removed {name}", name = shown))
     }
 
     /// Puts a Recently removed item back where it was.
     fn put_back(&mut self, id: &str) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
-        let entry = removed.take(id).ok_or("It's no longer in Recently removed.")?;
+        let entry = removed.take(id).ok_or(tr!("It's no longer in Recently removed."))?;
         let result = store.change(|doc| {
             let spot = edit::put_back_spot(doc, entry.was_at, entry.was_in.as_deref());
             edit::insert(doc, spot, entry.table.clone())
@@ -1744,16 +1774,17 @@ impl Dock {
         let ((), change) = result.inspect_err(|_| {
             let _ = removed.restore(&entry); // leave it in the list
         })?;
-        log_info!("put back {}", entry.label);
-        let label = entry.label.clone();
-        self.show_change(UndoStep { what: format!("put back {label}"), change, removed_id: None, put_back: Some(entry) }, format!("Put {label} back"))
+        let label = edit::label(&entry.table);
+        log_info!("put back {label}");
+        let done = tr!("Put {name} back", name = entry.label);
+        self.show_change(UndoStep { what: format!("put back {label}"), change, removed_id: None, put_back: Some(entry) }, done)
     }
 
     /// Undoes the latest change (the strip's Undo), unless dock.toml was changed by hand since:
     /// then nothing is touched.
     fn undo(&mut self) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
-        let step = self.undo.take().ok_or("There's nothing to undo.")?;
+        let step = self.undo.take().ok_or(tr!("There's nothing to undo."))?;
         store.revert(&step.change)?;
         if let Some(id) = &step.removed_id {
             removed.take(id);
@@ -1769,14 +1800,15 @@ impl Dock {
     /// Moves an item along the dock into `gap` (counted among the other items).
     fn move_to(&mut self, from: usize, gap: usize, expect: &str) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
-        let label = edit::label_of(&self.items.get(from).ok_or("That item isn't there any more.")?.cfg);
+        let label = edit::label_of(&self.items.get(from).ok_or(tr!("That item isn't there any more."))?.cfg);
         if label != expect {
-            return Err(format!("The dock changed during the drag ({expect} has moved), so nothing was done. Try again."));
+            return Err(tr!("The dock changed during the drag ({name} has moved), so nothing was done. Try again.", name = expect));
         }
+        let shown = self.shown_at(Spot::dock(from));
         let to = if gap >= from { gap + 1 } else { gap }; // edit::move_item counts the item itself
         let ((), change) = store.change(|doc| edit::move_item(doc, Spot::dock(from), Spot::dock(to), &label))?;
         log_info!("moved {label}");
-        self.show_change(UndoStep { what: format!("move {label}"), change, removed_id: None, put_back: None }, format!("Moved {label}"))
+        self.show_change(UndoStep { what: format!("move {label}"), change, removed_id: None, put_back: None }, tr!("Moved {name}", name = shown))
     }
 
     /// Lock icons: no dragging them around or off the dock, and no Remove in the menu.
@@ -2062,7 +2094,8 @@ impl Dock {
             None if drag.image_off != Some(true) => {
                 // A group let go before it was held off long enough: nothing happens.
                 log_info!("{} let go off the dock too soon to remove it", drag.label);
-                self.show_notice(&format!("To remove {}, hold it off the dock for a moment", drag.label));
+                let shown = self.shown_as(Spot::dock(drag.index), &drag.label);
+                self.show_notice(&tr!("To remove {name}, hold it off the dock for a moment", name = shown));
                 Ok(())
             }
             None => self.remove_item(drag.index, &drag.label),
@@ -2077,36 +2110,39 @@ impl Dock {
     /// Let go into a group: the dock icon or group item `child` of `from` goes into `group`, at
     /// `place` (counted the way its pop-up showed it) or at its end.
     fn drop_in_group(&mut self, from: usize, child: Option<usize>, group: usize, place: Option<usize>, expect: &str) -> std::result::Result<(), String> {
-        let group_label = self.items.get(group).map(|item| edit::label_of(&item.cfg)).ok_or("That group isn't there any more.")?;
+        let group_label = self.items.get(group).map(|item| edit::label_of(&item.cfg)).ok_or(tr!("That group isn't there any more."))?;
         let end = self.items.get(group).map_or(0, |item| item.children.len());
         let source = match child {
             Some(k) => Spot::in_group(from, k),
             None => Spot::dock(from),
         };
         let place = place.unwrap_or(end);
+        let shown = self.shown_as(source, expect);
         if child.is_some() && from == group {
             let k = child.unwrap_or(0);
             if place == k || place == k + 1 {
                 log_info!("dropped {expect} back in its own place");
                 return Ok(());
             }
-            return self.move_spot(source, Spot::in_group(group, place), expect, format!("Moved {expect}"));
+            return self.move_spot(source, Spot::in_group(group, place), expect, format!("Moved {expect}"), tr!("Moved {name}", name = shown));
         }
-        self.move_spot(source, Spot::in_group(group, place), expect, format!("Moved {expect} to {group_label}"))
+        let done = tr!("Moved {name} to {group}", name = shown, group = self.shown_at(Spot::dock(group)));
+        self.move_spot(source, Spot::in_group(group, place), expect, format!("Moved {expect} to {group_label}"), done)
     }
 
     /// Out of a group onto the dock, at `gap` (counted among everything on the dock).
     fn take_out_to(&mut self, group: usize, child: usize, gap: usize, expect: &str) -> std::result::Result<(), String> {
         let group_label = self.items.get(group).map(|item| edit::label_of(&item.cfg)).unwrap_or_default();
-        self.move_spot(Spot::in_group(group, child), Spot::dock(gap), expect, format!("Took {expect} out of {group_label}"))
+        let done = tr!("Took {name} out of {group}", name = self.shown_as(Spot::in_group(group, child), expect), group = self.shown_at(Spot::dock(group)));
+        self.move_spot(Spot::in_group(group, child), Spot::dock(gap), expect, format!("Took {expect} out of {group_label}"), done)
     }
 
-    /// One move, saved, with the Undo strip saying `done`.
-    fn move_spot(&mut self, from: Spot, to: Spot, expect: &str, done: String) -> std::result::Result<(), String> {
+    /// One move, saved, with the Undo strip saying `done` (and the log `what`, in English).
+    fn move_spot(&mut self, from: Spot, to: Spot, expect: &str, what: String, done: String) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
         let ((), change) = store.change(|doc| edit::move_item(doc, from, to, expect))?;
-        log_info!("{}", done.to_lowercase());
-        let step = UndoStep { what: done.to_lowercase(), change, removed_id: None, put_back: None };
+        log_info!("{}", what.to_lowercase());
+        let step = UndoStep { what: what.to_lowercase(), change, removed_id: None, put_back: None };
         self.show_change(step, done)
     }
 
@@ -2183,7 +2219,7 @@ impl Dock {
             // Never silent: the dock comes out and says why it won't take the drop.
             log_info!("icons are locked: the drag is turned away (and told why)");
             self.show();
-            self.show_notice(LOCKED_NOTICE);
+            self.show_notice(crate::text::t(LOCKED_NOTICE));
             return false;
         }
         if self.editable().is_err() {
@@ -2209,9 +2245,9 @@ impl Dock {
         let onto = self.layout.onto_icon(x, y).filter(|&index| self.takes_drops(index));
         let gap = if onto.is_some() || self.layout.drag_is_off(x, y) { None } else { Some(self.layout.insert_gap(x)) };
         let label = match onto {
-            Some(index) if self.items[index].cfg.kind == Kind::RecycleBin => "Move to Recycle Bin".to_string(),
-            Some(index) if self.items[index].cfg.kind == Kind::Group => format!("Add to {}", edit::label_of(&self.items[index].cfg)),
-            Some(index) => format!("Open with {}", edit::label_of(&self.items[index].cfg)),
+            Some(index) if self.items[index].cfg.kind == Kind::RecycleBin => tr!("Move to Recycle Bin").to_string(),
+            Some(index) if self.items[index].cfg.kind == Kind::Group => tr!("Add to {group}", group = edit::shown_label_of(&self.items[index].cfg)),
+            Some(index) => tr!("Open with {name}", name = edit::shown_label_of(&self.items[index].cfg)),
             None => String::new(),
         };
         if onto != previous {
@@ -2258,7 +2294,7 @@ impl Dock {
                 Some(PendingDrop::Onto(index, label, dropped))
             }
             (None, Some(gap)) if !dropped.items.is_empty() => Some(PendingDrop::Add(gap, dropped.items)),
-            (None, Some(_)) => return Err("The dock can't add what was dropped.".into()),
+            (None, Some(_)) => return Err(tr!("The dock can't add what was dropped.").into()),
             (None, None) => return Ok(false),
         };
         if let Some(hwnd) = self.hwnd {
@@ -2274,7 +2310,7 @@ impl Dock {
     fn drop_onto(&mut self, index: usize, expect: &str, dropped: drop::Dropped) -> Option<Action> {
         let item = self.items.get(index).filter(|item| edit::label_of(&item.cfg) == expect);
         let Some(item) = item else {
-            return Some(Action::Error(format!("The dock changed during the drop ({expect} has moved), so nothing was done. Try again.")));
+            return Some(Action::Error(tr!("The dock changed during the drop ({name} has moved), so nothing was done. Try again.", name = expect)));
         };
         if item.cfg.kind == Kind::RecycleBin {
             self.recycle(dropped.paths);
@@ -2289,7 +2325,7 @@ impl Dock {
             }
         }
         if dropped.paths.is_empty() {
-            return Some(Action::Error(format!("Only files and folders can be opened with {expect}.")));
+            return Some(Action::Error(tr!("Only files and folders can be opened with {name}.", name = edit::shown_label_of(&item.cfg))));
         }
         let quoted: Vec<String> = dropped.paths.iter().map(|path| format!("\"{path}\"")).collect();
         let mut with_files = item.cfg.clone();
@@ -2338,7 +2374,7 @@ impl Dock {
     fn start_pick(&mut self, pick: Pick, start: String, purpose: Purpose) -> std::result::Result<(), String> {
         self.editable()?;
         if self.picking {
-            return Err("A file window is already open.".into());
+            return Err(tr!("A file window is already open.").into());
         }
         let Some(hwnd) = self.hwnd else { return Ok(()) };
         self.picking = true;
@@ -2383,14 +2419,16 @@ impl Dock {
     /// settings stay; Undo is on the strip.
     fn replace_program(&mut self, index: usize, expect: &str, new: &ItemConfig) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
+        let shown = self.shown_as(Spot::dock(index), expect);
         let ((), change) = store.change(|doc| edit::replace_program(doc, Spot::dock(index), expect, new))?;
         log_info!("replaced {expect}'s program with {} ({})", edit::label_of(new), new.target);
-        self.show_change(UndoStep { what: format!("replace {expect}"), change, removed_id: None, put_back: None }, format!("Replaced {expect}"))
+        self.show_change(UndoStep { what: format!("replace {expect}"), change, removed_id: None, put_back: None }, tr!("Replaced {name}", name = shown))
     }
     /// Things dropped onto a group go in at its end.
     fn add_into_group(&mut self, group: usize, expect: &str, items: &[ItemConfig]) -> std::result::Result<(), String> {
+        let shown_group = self.shown_as(Spot::dock(group), expect);
         if items.is_empty() {
-            return Err(format!("None of that can go into {expect}."));
+            return Err(tr!("None of that can go into {group}.", group = shown_group));
         }
         let (store, _) = self.editable()?;
         let end = self.items.get(group).map_or(0, |item| item.children.len());
@@ -2400,12 +2438,12 @@ impl Dock {
             }
             Ok(())
         })?;
-        let label = match items {
-            [one] => edit::label_of(one),
-            many => format!("{} items", many.len()),
+        let (label, done) = match items {
+            [one] => (edit::label_of(one), tr!("Added {name} to {group}", name = edit::shown_label_of(one), group = shown_group)),
+            many => (format!("{} items", many.len()), trn!("Added {n} item to {group}", "Added {n} items to {group}", many.len(), group = shown_group)),
         };
         log_info!("added {label} to {expect}");
-        self.show_change(UndoStep { what: format!("add {label} to {expect}"), change, removed_id: None, put_back: None }, format!("Added {label} to {expect}"))
+        self.show_change(UndoStep { what: format!("add {label} to {expect}"), change, removed_id: None, put_back: None }, done)
     }
 
     fn add_items(&mut self, gap: usize, items: &[ItemConfig]) -> std::result::Result<(), String> {
@@ -2416,14 +2454,14 @@ impl Dock {
             }
             Ok(())
         })?;
-        let label = match items {
-            [one] => edit::label_of(one),
-            many => format!("{} items", many.len()),
+        let (label, done) = match items {
+            [one] => (edit::label_of(one), tr!("Added {name}", name = edit::shown_label_of(one))),
+            many => (format!("{} items", many.len()), trn!("Added {n} item", "Added {n} items", many.len())),
         };
         for item in items {
             log_info!("added {} ({})", edit::label_of(item), item.target);
         }
-        self.show_change(UndoStep { what: format!("add {label}"), change, removed_id: None, put_back: None }, format!("Added {label}"))
+        self.show_change(UndoStep { what: format!("add {label}"), change, removed_id: None, put_back: None }, done)
     }
 
     /// Shows or hides the drop zone along the top edge, over the dock's width.
@@ -2573,7 +2611,7 @@ impl Dock {
             self.start_timer(TIMER_UPDATE_TELL, UPDATE_TELL_AGAIN_MS);
             return;
         }
-        self.show_notice(&format!("Desktop Dock {} is out: see Dock settings > About.", status.latest));
+        self.show_notice(&tr!("Desktop Dock {version} is out: see Dock settings > About.", version = status.latest));
         self.linger_until = Some(Instant::now() + WELCOME_FOR);
         self.start_timer(TIMER_STRIP, WELCOME_FOR.as_millis() as u32);
         log_info!("said Desktop Dock {} is out", status.latest);
@@ -2590,10 +2628,10 @@ impl Dock {
             return;
         }
         self.show_notice(match self.settings.edge {
-            Edge::Top => "Rest the pointer at the top of the screen to bring your dock out.",
-            Edge::Bottom => "Rest the pointer at the bottom edge of the screen to bring your dock out.",
-            Edge::Left => "Rest the pointer at the left edge of the screen to bring your dock out.",
-            Edge::Right => "Rest the pointer at the right edge of the screen to bring your dock out.",
+            Edge::Top => tr!("Rest the pointer at the top of the screen to bring your dock out."),
+            Edge::Bottom => tr!("Rest the pointer at the bottom edge of the screen to bring your dock out."),
+            Edge::Left => tr!("Rest the pointer at the left edge of the screen to bring your dock out."),
+            Edge::Right => tr!("Rest the pointer at the right edge of the screen to bring your dock out."),
         });
         self.linger_until = Some(Instant::now() + WELCOME_FOR);
         self.start_timer(TIMER_STRIP, WELCOME_FOR.as_millis() as u32);
@@ -2604,7 +2642,7 @@ impl Dock {
         log_info!("strip: {message}{}", if undoable { " · Undo" } else { "" });
         let g = self.layout.geo;
         let text: Vec<u16> = message.encode_utf16().collect();
-        let undo: Vec<u16> = "Undo".encode_utf16().collect();
+        let undo: Vec<u16> = tr!("Undo").encode_utf16().collect();
         let text_w = self.text_width(&text);
         let undo_w = if undoable { self.text_width(&undo) } else { 0.0 };
         let (pad, gap) = (12.0 * g.scale, if undoable { 14.0 * g.scale } else { 0.0 });
@@ -3069,8 +3107,8 @@ impl Dock {
         self.close_group_now("another group opened");
         let Some(item) = self.items.get(index) else { return };
         if item.children.is_empty() {
-            let label = edit::label_of(&item.cfg);
-            self.show_notice(&format!("{label} is empty: right-click an icon > Move to group"));
+            let label = edit::shown_label_of(&item.cfg);
+            self.show_notice(&tr!("{group} is empty: right-click an icon > Move to group", group = label));
             return;
         }
         let Some(slot) = self.layout.slot_of(index) else { return };
@@ -3203,7 +3241,7 @@ impl Dock {
                 ghost: dragged == Some(k),
             })
             .collect();
-        let name: Vec<u16> = edit::label_of(&item.cfg).encode_utf16().collect();
+        let name: Vec<u16> = edit::shown_label_of(&item.cfg).encode_utf16().collect();
         let fonts = popup::Fonts { name: name_font, wrapped, title };
         let state = popup::State { hovered: open.hovered, marker };
         let measure = |text: &[u16], width: f32| self.text_height_in(text, wrapped, width);
@@ -3319,40 +3357,45 @@ impl Dock {
     /// Right-click → New group: the item becomes a group holding it, in its place.
     fn new_group(&mut self, index: usize, expect: &str) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
-        let ((), change) = store.change(|doc| edit::make_group(doc, index, expect, NEW_GROUP_NAME))?;
+        let shown = self.shown_as(Spot::dock(index), expect);
+        let ((), change) = store.change(|doc| edit::make_group(doc, index, expect, crate::text::t(NEW_GROUP_NAME)))?;
         log_info!("made a new group with {expect}");
         let step = UndoStep { what: format!("new group with {expect}"), change, removed_id: None, put_back: None };
-        self.show_change(step, format!("New group with {expect} (right-click > Properties to name it)"))
+        self.show_change(step, tr!("New group with {name} (right-click > Properties to name it)", name = shown))
     }
 
     /// Right-click → Ungroup: its items go back on the dock, in its place.
     fn ungroup(&mut self, index: usize, expect: &str) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
+        let shown = self.shown_as(Spot::dock(index), expect);
         let (count, change) = store.change(|doc| edit::ungroup(doc, index, expect))?;
         log_info!("ungrouped {expect} ({count} items)");
         let step = UndoStep { what: format!("ungroup {expect}"), change, removed_id: None, put_back: None };
-        self.show_change(step, format!("Ungrouped {expect}"))
+        self.show_change(step, tr!("Ungrouped {group}", group = shown))
     }
 
     /// Right-click → Move to group ▸: into that group, at its end.
     fn move_into_group(&mut self, index: usize, expect: &str, group: usize, group_label: &str) -> std::result::Result<(), String> {
         let end = self.items.get(group).map_or(0, |item| item.children.len());
-        self.move_spot(Spot::dock(index), Spot::in_group(group, end), expect, format!("Moved {expect} to {group_label}"))
+        let done = tr!("Moved {name} to {group}", name = self.shown_as(Spot::dock(index), expect), group = self.shown_as(Spot::dock(group), group_label));
+        self.move_spot(Spot::dock(index), Spot::in_group(group, end), expect, format!("Moved {expect} to {group_label}"), done)
     }
 
     /// From a group's pop-up: out onto the dock, just after the group.
     fn take_out(&mut self, group: usize, child: usize, expect: &str, group_label: &str) -> std::result::Result<(), String> {
-        self.move_spot(Spot::in_group(group, child), Spot::dock(group + 1), expect, format!("Took {expect} out of {group_label}"))
+        let done = tr!("Took {name} out of {group}", name = self.shown_as(Spot::in_group(group, child), expect), group = self.shown_as(Spot::dock(group), group_label));
+        self.move_spot(Spot::in_group(group, child), Spot::dock(group + 1), expect, format!("Took {expect} out of {group_label}"), done)
     }
 
     /// From a group's pop-up: removed (into Recently removed, remembering its group).
     fn remove_child(&mut self, group: usize, child: usize, expect: &str, group_label: &str) -> std::result::Result<(), String> {
         let (store, removed) = self.editable()?;
+        let done = tr!("Removed {name} from {group}", name = self.shown_as(Spot::in_group(group, child), expect), group = self.shown_as(Spot::dock(group), group_label));
         let (table, change) = store.change(|doc| edit::remove(doc, Spot::in_group(group, child), expect))?;
         let removed_id = removed.add(&table, child, Some(group_label)).inspect_err(|e| log_warn!("Recently removed: {e}")).ok();
         log_info!("removed {expect} from {group_label}");
         let step = UndoStep { what: format!("remove {expect} from {group_label}"), change, removed_id, put_back: None };
-        self.show_change(step, format!("Removed {expect} from {group_label}"))
+        self.show_change(step, done)
     }
 
     /// Hides at once, with no slide.
@@ -3641,7 +3684,7 @@ impl Dock {
                     self.start_drag();
                 } else if self.locked_press.is_some_and(|start| self.moved_past_drag_distance(start)) {
                     self.locked_press = None; // an icon can't be dragged while locked: say so
-                    self.show_notice(LOCKED_ICON_NOTICE);
+                    self.show_notice(crate::text::t(LOCKED_ICON_NOTICE));
                 } else {
                     let (x, y) = point_from_lparam(lparam);
                     let (along, away) = self.layout.geo.frame().from_window(x as f32, y as f32);
@@ -4196,17 +4239,17 @@ impl Dock {
     }
 
     /// Every icon's name, drawn once into one picture (see `Names`): a thin dark outline keeps
-    /// the white text readable on any wallpaper, as under the icon you point at.
+    /// the white text readable on any wallpaper, as for the icon you point at.
     fn names_picture(&mut self) -> Option<Names> {
         let g = self.layout.geo;
-        // A cell per name: under the icons, as wide as a slot; on a side, a line as long as the
-        // room beside them, aligned toward the icon.
-        let (format, cell_w) = if g.edge.is_side() {
-            (self.side_format.clone()?, g.label_w.floor().max(8.0))
+        // A cell per name: under the icons, as wide as a slot and its lines deep; on a side, a
+        // line as long as the room beside them, aligned toward the icon.
+        let (format, cell_w, text_h) = if g.edge.is_side() {
+            (self.side_format.clone()?, g.label_w.floor().max(8.0), g.label_h)
         } else {
-            (self.names_format.clone()?, (g.icon + g.gap).floor().max(8.0))
+            (self.names_format.clone()?, (g.icon + g.gap).floor().max(8.0), g.names_h.max(g.line_h))
         };
-        let cell_h = g.label_h + 2.0;
+        let cell_h = (text_h + 2.0).ceil();
         let mut cell_of = vec![None; self.items.len()];
         let mut labels: Vec<&[u16]> = Vec::new();
         for slot in self.layout.slots.iter().filter(|slot| !slot.separator) {
@@ -4221,7 +4264,7 @@ impl Dock {
         let picture = self.renderer.picture(width, cell_h as i32, |rt| unsafe {
             for (k, text) in labels.iter().enumerate() {
                 let x = k as f32 * cell_w;
-                let area = rect(x + 1.0, 1.0, x + cell_w - 1.0, 1.0 + g.label_h);
+                let area = rect(x + 1.0, 1.0, x + cell_w - 1.0, 1.0 + text_h);
                 brush.SetColor(&rgba(0.0, 0.0, 0.0, 0.55));
                 for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
                     let shifted = rect(area.left + dx, area.top + dy, area.right + dx, area.bottom + dy);
@@ -4234,7 +4277,7 @@ impl Dock {
         match picture {
             Ok(picture) => Some(Names { picture, cell_w, cell_h, cell_of }),
             Err(e) => {
-                log_warn!("couldn't draw the names under the icons: {e}");
+                log_warn!("couldn't draw the icons' names: {e}");
                 None
             }
         }
@@ -4397,7 +4440,7 @@ impl Dock {
 
             // Under the hovered icon its name; under an icon something is dragged onto, what would
             // happen (shown even with labels off: it's the only sign of what a drop will do).
-            let into_text = into.and_then(|g| self.items.get(g)).map(|item| format!("Move into {}", edit::label_of(&item.cfg)).encode_utf16().collect::<Vec<u16>>());
+            let into_text = into.and_then(|g| self.items.get(g)).map(|item| tr!("Move into {group}", group = edit::shown_label_of(&item.cfg)).encode_utf16().collect::<Vec<u16>>());
             let onto = self
                 .incoming
                 .as_ref()
@@ -4419,14 +4462,26 @@ impl Dock {
                     .filter(|&index| !self.group.as_ref().is_some_and(|open| open.index == index)) // its pop-up names it
                     .and_then(|index| self.items.get(index).map(|item| (index, &item.label))),
             };
-            // Every icon's name, while names are always shown: from the picture, under the panel,
-            // each fading out while its own icon is pointed at (its full name shows instead) and
-            // dimmed beside it, so that one reads clearly.
+            // Every icon's name, while names are always shown: from the picture, on the panel under
+            // the icons (beside them on a side), each fading out while its own icon is pointed at
+            // (its full name shows instead) and dimmed beside it, so that one reads clearly.
             if let Some(names) = &self.names {
-                // On a side the text itself starts at its cell's edge, so it keeps a gap.
-                let top = if g.edge.is_side() { (g.panel_h + SIDE_TEXT_GAP * g.scale).round() } else { (g.panel_h + 2.0 * g.scale).round() - 1.0 };
+                // (The picture's cells keep a pixel round the text for its outline.)
+                let top = g.names_top.round() - if g.edge.is_side() { 0.0 } else { 1.0 };
                 let open_group = self.group.as_ref().map(|open| open.index);
                 let icons: Vec<&layout::Slot> = self.layout.slots.iter().filter(|slot| !slot.separator).collect();
+                // Names under the panel: the full name of the icon pointed at goes among them (just
+                // past its grown icon), and the names it would run over fade out while it shows.
+                let cover = if g.names_h > 0.0 && !g.edge.is_side() {
+                    shown.and_then(|(index, text)| {
+                        let slot = self.layout.slot_of(index)?;
+                        let half = self.text_width_in(text, self.text_format.as_ref()?) / 2.0 + 4.0 * g.scale;
+                        let cx = slot.center(&g) + self.items[index].shift;
+                        Some((cx - half, cx + half, self.items[index].hover_t))
+                    })
+                } else {
+                    None
+                };
                 for (k, slot) in icons.iter().enumerate() {
                     let index = slot.item;
                     if Some(index) == dragged || Some(index) == open_group || shown.is_some_and(|(i, _)| i == index) {
@@ -4435,7 +4490,12 @@ impl Dock {
                     let Some(cell) = names.cell_of.get(index).copied().flatten() else { continue };
                     let item = &self.items[index];
                     let beside = [k.checked_sub(1), Some(k + 1)].into_iter().flatten().filter_map(|n| icons.get(n)).map(|s| self.items[s.item].hover_t).fold(0.0f32, f32::max);
-                    let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside);
+                    let covered = cover.map_or(0.0, |(from, to, t)| {
+                        let left = slot.center(&g) + item.shift - names.cell_w / 2.0 + 4.0 * g.scale;
+                        let right = left + names.cell_w - 8.0 * g.scale;
+                        if right > from && left < to { t } else { 0.0 }
+                    });
+                    let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside) * (1.0 - covered);
                     if opacity <= 0.01 {
                         continue;
                     }
@@ -4462,7 +4522,13 @@ impl Dock {
                     let (_, y, size) = layout::icon_rect(&g, slot, item.hover_t, item.bounce(g.bounce));
                     let cx = slot.center(&g);
                     let gap = if g.edge.is_side() { SIDE_TEXT_GAP } else { 3.0 };
-                    let text_top = (y + size + gap * g.scale).round();
+                    // With every icon's name showing, on top or bottom its full name goes among
+                    // them, just past its grown icon (the names it runs over have faded out).
+                    let mut text_top = y + size + gap * g.scale;
+                    if g.names_h > 0.0 && !g.edge.is_side() {
+                        text_top = text_top.max(g.names_top);
+                    }
+                    let text_top = text_top.round();
                     let area = if g.edge.is_side() {
                         // (A line's height even with names off: drop hints still show.)
                         let line = g.label_h.max((24.0 * self.settings.label_size / 12.5 * g.scale).round());
@@ -4495,7 +4561,7 @@ impl Dock {
                 }
                 if let Some(undo_rect) = strip.undo_rect {
                     brush.SetColor(&rgba(0.52, 0.72, 0.92, 1.0));
-                    let undo: Vec<u16> = "Undo".encode_utf16().collect();
+                    let undo: Vec<u16> = tr!("Undo").encode_utf16().collect();
                     rt.DrawText(&undo, format, &middle(undo_rect), brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 }
             }
@@ -4640,10 +4706,10 @@ fn show_child_menu(hwnd: HWND, pt: POINT, group: usize, child: usize) {
         let item = dock.items.get(group)?;
         let inner = item.children.get(child)?;
         dock.menu_open = true;
-        Some((edit::label_of(&inner.cfg), edit::label_of(&item.cfg), dock.settings.locked, dock.mode))
+        Some((edit::label_of(&inner.cfg), edit::label_of(&item.cfg), edit::shown_label_of(&inner.cfg), edit::shown_label_of(&item.cfg), dock.settings.locked, dock.mode))
     })
     .flatten();
-    let Some((label, group_label, locked, mode)) = facts else { return };
+    let Some((label, group_label, shown, shown_group, locked, mode)) = facts else { return };
     let choice = unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             with_dock(|dock| dock.menu_open = false);
@@ -4651,23 +4717,24 @@ fn show_child_menu(hwnd: HWND, pt: POINT, group: usize, child: usize) {
         };
         // Nothing to offer that could only fail: say why instead.
         let why = match mode {
-            Mode::SafeStart => Some(w!("dock.toml has an error (right-click the dock to restore it)")),
-            Mode::ReadOnly => Some(w!("dock.toml is from a newer Desktop Dock: it's used as it is")),
-            Mode::Normal if locked => Some(w!("Icons are locked (right-click the dock to unlock)")),
+            Mode::SafeStart => Some(tr!("dock.toml has an error (right-click the dock to restore it)")),
+            Mode::ReadOnly => Some(tr!("dock.toml is from a newer Desktop Dock: it's used as it is")),
+            Mode::Normal if locked => Some(tr!("Icons are locked (right-click the dock to unlock)")),
             Mode::Normal => None,
         };
         match why {
             Some(why) => {
-                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, why);
+                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(why));
             }
             None => {
-                let _ = AppendMenuW(menu, MF_STRING, CHILD_TAKE_OUT, &HSTRING::from(format!("Take {} out of {}", label, group_label).replace('&', "&&")));
-                let _ = AppendMenuW(menu, MF_STRING, CHILD_REMOVE, &HSTRING::from(format!("Remove {label}").replace('&', "&&")));
+                let take_out = tr!("Take {name} out of {group}", name = shown, group = shown_group);
+                let _ = AppendMenuW(menu, MF_STRING, CHILD_TAKE_OUT, &HSTRING::from(take_out.replace('&', "&&")));
+                let _ = AppendMenuW(menu, MF_STRING, CHILD_REMOVE, &HSTRING::from(tr!("Remove {name}", name = shown).replace('&', "&&")));
             }
         }
         if mode == Mode::Normal {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, CHILD_PROPERTIES, w!("Properties..."));
+            let _ = AppendMenuW(menu, MF_STRING, CHILD_PROPERTIES, &wtr!("Properties..."));
         }
         let _ = SetForegroundWindow(hwnd);
         let flags = TPM_RETURNCMD.0 | TPM_RIGHTBUTTON.0 | TPM_TOPALIGN.0 | TPM_LEFTALIGN.0;
@@ -4708,6 +4775,8 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         on_bin: bool,
         /// The right-clicked item: its index and label.
         target: Option<(usize, String)>,
+        /// What it's called on screen.
+        target_name: String,
         /// Recently removed, newest first: id and menu text.
         removed: Vec<(String, String)>,
         locked: bool,
@@ -4716,8 +4785,8 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         kind: Option<Kind>,
         has_bin: bool,
         count: usize,
-        /// The groups on the dock: index and name.
-        groups: Vec<(usize, String)>,
+        /// The groups on the dock: index, label and what each is called on screen.
+        groups: Vec<(usize, String, String)>,
         /// The right-clicked item's file or folder, if it's one that's there (Open file location).
         location: Option<String>,
     }
@@ -4732,7 +4801,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
             auto_hide: dock.settings.auto_hide,
             kind: picked.map(|(_, it)| it.cfg.kind),
             has_bin: dock.items.iter().any(|it| it.cfg.kind == Kind::RecycleBin),
-            groups: dock.items.iter().enumerate().filter(|(_, it)| it.cfg.kind == Kind::Group).map(|(i, it)| (i, edit::label_of(&it.cfg))).collect(),
+            groups: dock.items.iter().enumerate().filter(|(_, it)| it.cfg.kind == Kind::Group).map(|(i, it)| (i, edit::label_of(&it.cfg), edit::shown_label_of(&it.cfg))).collect(),
             // On a server, it isn't asked (one switched off kept the dock waiting 15 s): there
             // unless the dock's own look, in the background, found it missing.
             location: picked
@@ -4743,6 +4812,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
             count: dock.items.len(),
             on_bin: picked.is_some_and(|(_, it)| it.cfg.kind == Kind::RecycleBin),
             target: picked.map(|(i, it)| (i, edit::label_of(&it.cfg))),
+            target_name: picked.map(|(_, it)| edit::shown_label_of(&it.cfg)).unwrap_or_default(),
             removed: dock
                 .removed
                 .as_ref()
@@ -4781,53 +4851,54 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
             }
         };
         if facts.safe_start {
-            item(MF_STRING, MENU_RESTORE, "Restore last working version", &mut open);
+            item(MF_STRING, MENU_RESTORE, tr!("Restore last working version"), &mut open);
         }
         // The right-clicked item. (Changing the dock: not while locked, a locked dock doesn't change;
         // not at all when changes can't be saved.)
         let changeable = facts.editable && !facts.locked;
         separate(&mut open);
         if facts.on_bin {
-            item(MF_STRING, MENU_EMPTY_BIN, "Empty Recycle Bin", &mut open);
+            item(MF_STRING, MENU_EMPTY_BIN, tr!("Empty Recycle Bin"), &mut open);
         }
         if facts.location.is_some() {
-            item(MF_STRING, MENU_OPEN_LOCATION, "Open file location", &mut open);
+            item(MF_STRING, MENU_OPEN_LOCATION, tr!("Open file location"), &mut open);
         }
         if changeable && facts.kind.is_some_and(|kind| kind != Kind::Separator) {
-            item(MF_STRING, MENU_ICON_CHOOSE, "Change icon...", &mut open);
+            item(MF_STRING, MENU_ICON_CHOOSE, tr!("Change icon..."), &mut open);
         }
         // Groups: put an item in one (or make a new one with it), or ungroup a group.
         if changeable && matches!(facts.kind, Some(Kind::App | Kind::RecycleBin)) {
             if let Ok(sub) = CreatePopupMenu() {
-                for (k, (_, name)) in facts.groups.iter().enumerate() {
+                for (k, (_, _, name)) in facts.groups.iter().enumerate() {
                     let _ = AppendMenuW(sub, MF_STRING, MENU_TO_GROUP + k, &HSTRING::from(name.replace('&', "&&")));
                 }
                 if !facts.groups.is_empty() {
                     let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
                 }
-                let _ = AppendMenuW(sub, MF_STRING, MENU_NEW_GROUP, w!("New group"));
-                item(MF_POPUP, sub.0 as usize, "Move to group", &mut open);
+                let _ = AppendMenuW(sub, MF_STRING, MENU_NEW_GROUP, &wtr!("New group"));
+                item(MF_POPUP, sub.0 as usize, tr!("Move to group"), &mut open);
             }
         }
         if changeable && facts.kind == Some(Kind::Group) {
-            item(MF_STRING, MENU_UNGROUP, "Ungroup", &mut open);
+            item(MF_STRING, MENU_UNGROUP, tr!("Ungroup"), &mut open);
         }
         if facts.editable && facts.kind.is_some_and(|kind| kind != Kind::Separator) {
-            item(MF_STRING, MENU_PROPERTIES, "Properties...", &mut open);
+            item(MF_STRING, MENU_PROPERTIES, tr!("Properties..."), &mut open);
         }
-        if let (Some((_, label)), true) = (&facts.target, facts.editable && !facts.locked) {
-            item(MF_STRING, MENU_REMOVE, &format!("Remove {label}"), &mut open);
+        if facts.target.is_some() && facts.editable && !facts.locked {
+            item(MF_STRING, MENU_REMOVE, &tr!("Remove {name}", name = facts.target_name), &mut open);
         }
         // Bringing things onto the dock: new ones, or ones taken off (Put back: also while locked,
         // as it only undoes a removal).
         separate(&mut open);
         if changeable {
             if let Ok(sub) = CreatePopupMenu() {
-                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_FILES, w!("File..."));
-                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_FOLDER, w!("Folder..."));
-                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_SEPARATOR, w!("Separator"));
+                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_FILES, &wtr!("File..."));
+                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_FOLDER, &wtr!("Folder..."));
+                let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_SEPARATOR, &wtr!("Separator"));
                 if !facts.has_bin {
-                    let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_BIN, w!("Recycle Bin"));
+                    // Windows' own name for it (and the new item's).
+                    let _ = AppendMenuW(sub, MF_STRING, MENU_ADD_BIN, &HSTRING::from(places::recycle_bin_name().replace('&', "&&")));
                 }
                 if let Ok(windows) = CreatePopupMenu() {
                     for (k, place) in places.iter().enumerate() {
@@ -4840,9 +4911,9 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
                             }
                         }
                     }
-                    let _ = AppendMenuW(sub, MF_POPUP, windows.0 as usize, w!("Windows item"));
+                    let _ = AppendMenuW(sub, MF_POPUP, windows.0 as usize, &wtr!("Windows item"));
                 }
-                item(MF_POPUP, sub.0 as usize, "Add", &mut open);
+                item(MF_POPUP, sub.0 as usize, tr!("Add"), &mut open);
             }
         }
         if facts.editable && !facts.removed.is_empty() {
@@ -4850,20 +4921,20 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
                 for (k, (_, text)) in facts.removed.iter().enumerate() {
                     let _ = AppendMenuW(sub, MF_STRING, MENU_PUT_BACK + k, &HSTRING::from(text.replace('&', "&&")));
                 }
-                item(MF_POPUP, sub.0 as usize, "Put back", &mut open);
+                item(MF_POPUP, sub.0 as usize, tr!("Put back"), &mut open);
             }
         }
         // The dock itself. Everything else (its file, folder, Start with Windows) is in its settings.
         separate(&mut open);
         if facts.editable {
             let lock_flags = if facts.locked { MF_STRING | MF_CHECKED } else { MF_STRING };
-            item(lock_flags, MENU_LOCK, "Lock icons", &mut open);
+            item(lock_flags, MENU_LOCK, tr!("Lock icons"), &mut open);
             let hide_flags = if facts.auto_hide { MF_STRING | MF_CHECKED } else { MF_STRING };
-            item(hide_flags, MENU_AUTO_HIDE, "Hide automatically", &mut open);
+            item(hide_flags, MENU_AUTO_HIDE, tr!("Hide automatically"), &mut open);
         }
-        item(MF_STRING, MENU_SETTINGS, "Dock settings...", &mut open);
+        item(MF_STRING, MENU_SETTINGS, tr!("Dock settings..."), &mut open);
         separate(&mut open);
-        item(MF_STRING, MENU_EXIT, "Exit Desktop Dock", &mut open);
+        item(MF_STRING, MENU_EXIT, tr!("Exit Desktop Dock"), &mut open);
         // Required for the menu to close when clicking elsewhere (documented TrackPopupMenu quirk).
         let _ = SetForegroundWindow(hwnd);
         let flags = TPM_RETURNCMD.0 | TPM_RIGHTBUTTON.0 | TPM_TOPALIGN.0 | TPM_LEFTALIGN.0;
@@ -4883,7 +4954,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
         MENU_NEW_GROUP => facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.new_group(*index, label))),
         MENU_UNGROUP => facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.ungroup(*index, label))),
         _ if choice >= MENU_TO_GROUP && choice < MENU_TO_GROUP + facts.groups.len() => {
-            let (group, group_label) = facts.groups[choice - MENU_TO_GROUP].clone();
+            let (group, group_label, _) = facts.groups[choice - MENU_TO_GROUP].clone();
             facts.target.as_ref().and_then(|(index, label)| with_dock(|dock| dock.move_into_group(*index, label, group, &group_label)))
         }
         _ if (MENU_ADD_WINDOWS..MENU_ADD_WINDOWS + places.len()).contains(&choice) => {
@@ -4904,7 +4975,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
                     dock.add_items(gap, &[separator])
                 }
                 _ => {
-                    let mut bin = ItemConfig::new("Recycle Bin", "");
+                    let mut bin = ItemConfig::new(places::recycle_bin_name(), "");
                     bin.kind = Kind::RecycleBin;
                     dock.add_items(gap, &[bin])
                 }
@@ -5018,7 +5089,7 @@ fn open_window(home: &Home, which: &[String]) {
     }
     if let Err(e) = command.spawn() {
         log_warn!("couldn't open {}: {e}", which.join(" "));
-        show_error(&format!("Couldn't open Dock settings: {e}"));
+        show_error(&tr!("Couldn't open Dock settings: {error}", error = e));
     }
 }
 
@@ -5026,10 +5097,12 @@ fn open_window(home: &Home, which: &[String]) {
 /// (an update that left a new desktop shortcut, say). Asked after the drop has finished, so
 /// Explorer isn't waiting.
 fn confirm_replace(index: usize, label: &str, new: &ItemConfig) {
-    let text = format!(
-        "Replace {label} with {}?\n\n{}\n\nIt keeps its place, name and icon. You can undo this on the dock for a few seconds.",
-        edit::label_of(new),
-        new.target
+    let shown = with_dock(|dock| dock.shown_as(Spot::dock(index), label)).unwrap_or_else(|| label.to_string());
+    let text = tr!(
+        "Replace {name} with {program}?\n\n{target}\n\nIt keeps its place, name and icon. You can undo this on the dock for a few seconds.",
+        name = shown,
+        program = edit::shown_label_of(new),
+        target = new.target
     );
     let answer = system::message_box(&text, "Desktop Dock", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
     if answer != IDYES {
@@ -5232,9 +5305,7 @@ pub fn run(opened: store::Opened, store: Store, home: Home, started: Instant, sa
         if system::is_elevated() {
             log_warn!("running as administrator");
             system::notice(
-                "Desktop Dock is running as administrator, so everything it opens runs as administrator \
-                 too, and Windows won't let you drag files onto it.\n\nStart it the normal way (not \
-                 \"Run as administrator\") to avoid this."
+                tr!("Desktop Dock is running as administrator, so everything it opens runs as administrator too, and Windows won't let you drag files onto it.\n\nStart it the normal way (not \"Run as administrator\") to avoid this.")
                     .into(),
             );
         }
@@ -5622,7 +5693,7 @@ pub fn snapshot(config: Config, home: Home, dir: &Path) -> Result<()> {
     let pick = dock
         .items
         .iter()
-        .position(|item| item.cfg.name.eq_ignore_ascii_case("chrome"))
+        .position(|item| item.cfg.name.to_ascii_lowercase().contains("chrome"))
         .or_else(|| dock.items.iter().position(|item| !item.cfg.is_separator()));
     if let Some(index) = pick {
         if let Ok(loader) = IconLoader::new(None) {

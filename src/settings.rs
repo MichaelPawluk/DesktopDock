@@ -23,6 +23,7 @@ use crate::icons::{self, IconLoader, IconSource, Pixels};
 use crate::removed::{Entry, Removed};
 use crate::hotkey;
 use crate::store::{Backup, BackupKind, Store};
+use crate::text::{self, LANGUAGES};
 use crate::{chrome, drop, iconpicker, import, launch, pickers, places, system, update};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,7 +44,7 @@ use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_HOTKEY_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
     ILC_COLOR32, INITCOMMONCONTROLSEX, ImageList_Add, ImageList_Create, InitCommonControlsEx, IsDlgButtonChecked, LIST_VIEW_ITEM_FLAGS,
     LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVS_EX_FULLROWSELECT,
     LVSIL_SMALL, MEASUREITEMSTRUCT, NMHDR, NMLISTVIEW, NMLVKEYDOWN,
 };
@@ -52,7 +53,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, HOT_KE
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CreateDialogParamW, CreatePopupMenu, DestroyMenu, DestroyWindow,
     DispatchMessageW, FindWindowExW, FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetDlgItemTextW, GetMessageW, GetPropW,
-    GetWindowRect, HMENU, IDCANCEL, IDOK, IsDialogMessageW, IsIconic, IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LB_SETITEMHEIGHT, MF_POPUP, MF_SEPARATOR,
+    GetWindowRect, HMENU, IDCANCEL, IDOK, IsDialogMessageW, IsIconic, IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT, MF_POPUP, MF_SEPARATOR,
     MF_STRING, MSG, MapDialogRect, PostMessageW, PostQuitMessage, RemovePropW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOZORDER, SendMessageW,
     SetDlgItemTextW, SetForegroundWindow, SetPropW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
     TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORLISTBOX, WM_DESTROY, WM_DRAWITEM, WM_HSCROLL,
@@ -118,6 +119,7 @@ const IDC_LABEL_SIZE: i32 = 1308;
 const IDC_LAUNCH_EFFECT: i32 = 1314;
 const IDC_LOOK: i32 = 1315;
 const IDC_HOVER_GLOW: i32 = 1316;
+const IDC_LANGUAGE: i32 = 1317;
 const IDC_LOCKED: i32 = 1411;
 const IDC_STARTUP: i32 = 1412;
 const IDC_RESTING: i32 = 1413;
@@ -193,17 +195,18 @@ const GROUP_MOVE: usize = 100;
 /// What Group… > New group calls it (rename it in its properties).
 const NEW_GROUP_NAME: &str = "New group";
 
-/// The settings window's sections, in the order listed; each is a page beside the list. The
-/// number is its symbol in Windows' symbol font (Segoe Fluent Icons).
-const SECTIONS: [(PCWSTR, usize, u16); 8] = [
-    (w!("Look"), IDD_LOOK, 0xE790),              // a palette
-    (w!("Behaviour"), IDD_BEHAVIOUR, 0xE713),    // a gear
-    (w!("Screen"), IDD_SCREEN, 0xE7F4),          // a monitor
-    (w!("Items"), IDD_ITEMS, 0xE71D),            // a grid of apps
-    (w!("Recently removed"), IDD_REMOVED, 0xE74D), // a bin
-    (w!("Versions"), IDD_VERSIONS, 0xE81C),      // a clock going back
-    (w!("Files"), IDD_FILES, 0xE8B7),            // a folder
-    (w!("About"), IDD_ABOUT, 0xE946),            // an i
+/// The settings window's sections, in the order listed (their names in English, shown in the
+/// language in use); each is a page beside the list. The number is its symbol in Windows'
+/// symbol font (Segoe Fluent Icons).
+const SECTIONS: [(&str, usize, u16); 8] = [
+    (n!("Look"), IDD_LOOK, 0xE790),              // a palette
+    (n!("Behaviour"), IDD_BEHAVIOUR, 0xE713),    // a gear
+    (n!("Screen"), IDD_SCREEN, 0xE7F4),          // a monitor
+    (n!("Items"), IDD_ITEMS, 0xE71D),            // a grid of apps
+    (n!("Recently removed"), IDD_REMOVED, 0xE74D), // a bin
+    (n!("Versions"), IDD_VERSIONS, 0xE81C),      // a clock going back
+    (n!("Files"), IDD_FILES, 0xE8B7),            // a folder
+    (n!("About"), IDD_ABOUT, 0xE946),            // an i
 ];
 const SECTION_SCREEN: usize = 2;
 const SECTION_ITEMS: usize = 3;
@@ -226,28 +229,37 @@ const EN_CHANGE: u32 = 0x0300;
 struct Slider {
     id: i32,
     key: &'static str,
+    /// What the status line calls it (in English, shown in the language in use).
     what: &'static str,
     /// Range and step, in the setting's own units.
     min: f32,
     max: f32,
     step: f32,
-    unit: &'static str,
+    unit: Unit,
     /// Changing it makes new icons: saved when you let go, not while you drag.
     heavy: bool,
 }
 
+/// What a slider's value is counted in.
+#[derive(Clone, Copy)]
+enum Unit {
+    Pixels,
+    Percent,
+    Milliseconds,
+}
+
 const SLIDERS: [Slider; 11] = [
-    Slider { id: 1301, key: "icon_size", what: "Icon size", min: 16.0, max: 256.0, step: 1.0, unit: "px", heavy: true },
-    Slider { id: 1303, key: "zoom_size", what: "Zoom size", min: 16.0, max: 256.0, step: 1.0, unit: "px", heavy: true },
-    Slider { id: 1305, key: "spacing", what: "Spacing", min: 0.0, max: 64.0, step: 1.0, unit: "px", heavy: false },
-    Slider { id: IDC_LABEL_SIZE, key: "label_size", what: "Name size", min: 8.0, max: 24.0, step: 0.5, unit: "px", heavy: false },
-    Slider { id: 1310, key: "background_opacity", what: "Background", min: 0.0, max: 100.0, step: 1.0, unit: "%", heavy: false },
-    Slider { id: 1312, key: "icon_opacity", what: "Icons", min: 10.0, max: 100.0, step: 1.0, unit: "%", heavy: false },
-    Slider { id: 1401, key: "popup_delay_ms", what: "Show after", min: 0.0, max: 2000.0, step: 50.0, unit: "ms", heavy: false },
-    Slider { id: 1403, key: "hide_delay_ms", what: "Hide after", min: 0.0, max: 2000.0, step: 50.0, unit: "ms", heavy: false },
-    Slider { id: 1405, key: "slide_in_ms", what: "Slide in", min: 0.0, max: 1000.0, step: 25.0, unit: "ms", heavy: false },
-    Slider { id: 1407, key: "slide_out_ms", what: "Slide out", min: 0.0, max: 1000.0, step: 25.0, unit: "ms", heavy: false },
-    Slider { id: 1409, key: "zoom_ms", what: "Zoom time", min: 0.0, max: 1000.0, step: 10.0, unit: "ms", heavy: false },
+    Slider { id: 1301, key: "icon_size", what: n!("Icon size"), min: 16.0, max: 256.0, step: 1.0, unit: Unit::Pixels, heavy: true },
+    Slider { id: 1303, key: "zoom_size", what: n!("Zoom size"), min: 16.0, max: 256.0, step: 1.0, unit: Unit::Pixels, heavy: true },
+    Slider { id: 1305, key: "spacing", what: n!("Spacing"), min: 0.0, max: 64.0, step: 1.0, unit: Unit::Pixels, heavy: false },
+    Slider { id: IDC_LABEL_SIZE, key: "label_size", what: n!("Name size"), min: 8.0, max: 24.0, step: 0.5, unit: Unit::Pixels, heavy: false },
+    Slider { id: 1310, key: "background_opacity", what: n!("Background"), min: 0.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
+    Slider { id: 1312, key: "icon_opacity", what: n!("Icons"), min: 10.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
+    Slider { id: 1401, key: "popup_delay_ms", what: n!("Show after"), min: 0.0, max: 2000.0, step: 50.0, unit: Unit::Milliseconds, heavy: false },
+    Slider { id: 1403, key: "hide_delay_ms", what: n!("Hide after"), min: 0.0, max: 2000.0, step: 50.0, unit: Unit::Milliseconds, heavy: false },
+    Slider { id: 1405, key: "slide_in_ms", what: n!("Slide in"), min: 0.0, max: 1000.0, step: 25.0, unit: Unit::Milliseconds, heavy: false },
+    Slider { id: 1407, key: "slide_out_ms", what: n!("Slide out"), min: 0.0, max: 1000.0, step: 25.0, unit: Unit::Milliseconds, heavy: false },
+    Slider { id: 1409, key: "zoom_ms", what: n!("Zoom time"), min: 0.0, max: 1000.0, step: 10.0, unit: Unit::Milliseconds, heavy: false },
 ];
 
 /// A dock setting's current value, in the slider's units.
@@ -274,12 +286,40 @@ fn toml_number(value: f32) -> toml_edit::Value {
 }
 
 fn shown(slider: &Slider, value: f32) -> String {
-    if value.fract() == 0.0 { format!("{value:.0} {}", slider.unit) } else { format!("{value:.1} {}", slider.unit) }
+    let value = text::number(value as f64, if value.fract() == 0.0 { 0 } else { 1 });
+    match slider.unit {
+        Unit::Pixels => tr!("{value} px", value = value),
+        Unit::Percent => tr!("{value} %", value = value),
+        Unit::Milliseconds => tr!("{value} ms", value = value),
+    }
 }
 
-/// The text boxes: control, dock.toml key, and what the status line calls it.
-const FIELDS: [(i32, &str, &str); 4] =
-    [(IDC_NAME, "name", "Name"), (IDC_TARGET, "target", "Target"), (IDC_ARGS, "args", "Arguments"), (IDC_START_IN, "start_in", "Start in")];
+/// The text boxes: control and dock.toml key.
+const FIELDS: [(i32, &str); 4] = [(IDC_NAME, "name"), (IDC_TARGET, "target"), (IDC_ARGS, "args"), (IDC_START_IN, "start_in")];
+
+/// What the status line says once one of an item's properties (by its dock.toml key) is saved.
+fn property_saved(key: &str) -> &'static str {
+    match key {
+        "name" => tr!("Name: saved."),
+        "target" => tr!("Target: saved."),
+        "args" => tr!("Arguments: saved."),
+        "start_in" => tr!("Start in: saved."),
+        "icon" => tr!("Icon: saved."),
+        _ => tr!("Run: saved."),
+    }
+}
+
+/// What it says if one isn't, and why.
+fn property_not_saved(key: &str, error: String) -> String {
+    match key {
+        "name" => tr!("Name wasn't saved. {error}", error = error),
+        "target" => tr!("Target wasn't saved. {error}", error = error),
+        "args" => tr!("Arguments wasn't saved. {error}", error = error),
+        "start_in" => tr!("Start in wasn't saved. {error}", error = error),
+        "icon" => tr!("Icon wasn't saved. {error}", error = error),
+        _ => tr!("Run wasn't saved. {error}", error = error),
+    }
+}
 
 /// Which window to open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,8 +404,8 @@ struct Settings {
     /// Where each loaded icon sits in the list's image list.
     image_index: HashMap<Vec<IconSource>, i32>,
     arrived: Arc<Mutex<Vec<(Vec<IconSource>, Option<Pixels>, Option<Pixels>)>>>,
-    /// About > Updates: what's under way ("Checking..."), and what it came to (Ok: what to say;
-    /// Err: what went wrong).
+    /// About > Updates: what's under way ("Checking...", in English: it's shown in the language
+    /// in use), and what it came to (Ok: what to say; Err: what went wrong).
     update_busy: Option<&'static str>,
     update_done: Arc<Mutex<Option<Result<String, String>>>>,
     /// What this window's own Check now found (shown even if the dock folder can't keep it).
@@ -405,14 +445,14 @@ fn text_of(hwnd: HWND, id: i32) -> String {
 /// What a kept copy of your dock is, in words (Versions).
 fn kept_copy_kind(label: &str) -> &'static str {
     match label {
-        "before-restore" => "Before restoring a version",
-        "before-load" => "Before loading a copy",
-        "before-import" => "Before RocketDock import",
-        "before-revert" => "Before revert",
-        "before-install" => "Before install",
-        "broken" => "File with an error (kept)",
-        upgrade if upgrade.starts_with("before-v") && upgrade.ends_with("-migration") => "Before upgrade",
-        _ => "Snapshot",
+        "before-restore" => tr!("Before restoring a version"),
+        "before-load" => tr!("Before loading a copy"),
+        "before-import" => tr!("Before RocketDock import"),
+        "before-revert" => tr!("Before revert"),
+        "before-install" => tr!("Before install"),
+        "broken" => tr!("File with an error (kept)"),
+        upgrade if upgrade.starts_with("before-v") && upgrade.ends_with("-migration") => tr!("Before upgrade"),
+        _ => tr!("Snapshot"),
     }
 }
 
@@ -425,9 +465,19 @@ fn shown_value(key: &str, value: &str) -> String {
     }
 }
 
-/// Where an item's own icon comes from, in words: an image by its file name, one of Windows'
-/// own icons, or the program it's taken from ("from Google Chrome").
-fn icon_in_words(home: &Home, icon: &str) -> String {
+/// Where an item's own icon comes from.
+enum IconFrom {
+    /// One of Windows' own icons.
+    Windows,
+    /// Taken from a program (by its name: "Google Chrome").
+    Program(String),
+    /// An image, by its file name.
+    Image(String),
+}
+
+/// Where an item's own icon comes from: an image by its file name, one of Windows' own icons,
+/// or the program it's taken from (by the program's name).
+fn icon_from(home: &Home, icon: &str) -> IconFrom {
     let icon = icon.trim();
     // "file,number": one of the icons inside a program or library.
     let file = match icon.rsplit_once(',') {
@@ -441,15 +491,10 @@ fn icon_in_words(home: &Home, icon: &str) -> String {
     let in_windows = lower.starts_with(&windows_folder) || file.to_ascii_lowercase().starts_with(r"system32\");
     let program = [".exe", ".dll", ".icl", ".cpl", ".mun"].iter().any(|kind| lower.ends_with(kind));
     match (program, in_windows) {
-        (true, true) => "one of Windows' own".into(),
-        (true, false) => format!("from {}", system::program_name(&path).unwrap_or(file_name)),
-        (false, _) => file_name,
+        (true, true) => IconFrom::Windows,
+        (true, false) => IconFrom::Program(system::program_name(&path).unwrap_or(file_name)),
+        (false, _) => IconFrom::Image(file_name),
     }
-}
-
-/// "1 item", "3 items".
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn set_text(hwnd: HWND, id: i32, text: &str) {
@@ -511,9 +556,11 @@ fn pop_menu_with(owner: HWND, at: POINT, entries: &[(usize, String)], sub: Optio
     }
 }
 
+/// Posts a message to the running dock, found by its window's class alone (only the dock's
+/// window has it), so the lookup holds whatever its title says.
 fn tell_dock(message: u32, wparam: usize, lparam: isize) {
     unsafe {
-        if let Ok(dock) = FindWindowW(w!("DesktopDock"), w!("Desktop Dock")) {
+        if let Ok(dock) = FindWindowW(w!("DesktopDock"), PCWSTR::null()) {
             let _ = PostMessageW(Some(dock), message, WPARAM(wparam), LPARAM(lparam));
         }
     }
@@ -528,7 +575,8 @@ fn nudge_dock(show: bool) {
     }
 }
 
-/// Our window of this kind, if one is open.
+/// Our window of this kind, if one is open: found by the mark it carries, not by its title
+/// (which is in the language in use).
 fn find_open(mode: Mode) -> Option<HWND> {
     let mut after = None;
     unsafe {
@@ -568,8 +616,9 @@ fn folder_size(dir: &Path) -> u64 {
         .sum()
 }
 
+/// A size in megabytes, as a number written your region's way ("12.3", "12,3").
 fn megabytes(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    text::number(bytes as f64 / (1024.0 * 1024.0), 1)
 }
 
 /// How many items a dock.toml holds (groups' items counted too).
@@ -584,8 +633,8 @@ fn selected_row(list: HWND) -> Option<usize> {
     usize::try_from(row).ok()
 }
 
-/// Sets up a report list's columns: (title, share of the width).
-fn columns(list: HWND, titles: &[(PCWSTR, f32)]) {
+/// Sets up a report list's columns, each a share of the width (their titles: `column_titles`).
+fn columns(list: HWND, shares: &[f32]) {
     let mut client = RECT::default();
     unsafe {
         let _ = GetClientRect(list, &mut client);
@@ -593,9 +642,84 @@ fn columns(list: HWND, titles: &[(PCWSTR, f32)]) {
         SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(full_row)), Some(LPARAM(full_row as isize)));
         // Room left for the scroll bar, so the columns never need a sideways one.
         let width = ((client.right - client.left) as f32 * 0.93).max(100.0);
-        for (k, (title, share)) in titles.iter().enumerate() {
-            let column = LVCOLUMNW { mask: LVCF_TEXT | LVCF_WIDTH, cx: (width * share) as i32, pszText: PWSTR(title.as_ptr() as *mut u16), ..Default::default() };
+        for (k, share) in shares.iter().enumerate() {
+            let column = LVCOLUMNW { mask: LVCF_WIDTH, cx: (width * share) as i32, ..Default::default() };
             SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(k)), Some(LPARAM(&column as *const _ as isize)));
+        }
+    }
+}
+
+/// A report list's column titles (the list keeps its own copy of each).
+fn column_titles(list: HWND, titles: &[&str]) {
+    for (k, title) in titles.iter().enumerate() {
+        let mut wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let column = LVCOLUMNW { mask: LVCF_TEXT, pszText: PWSTR(wide.as_mut_ptr()), ..Default::default() };
+        unsafe {
+            SendMessageW(list, LVM_SETCOLUMNW, Some(WPARAM(k)), Some(LPARAM(&column as *const _ as isize)));
+        }
+    }
+}
+
+/// The texts the code puts into the windows (the section list, each drop-down's choices, the
+/// lists' column titles, the names screen readers say), in the language in use: as the windows
+/// open, and again when the language changes. `page` holds the property controls. Each list
+/// and box keeps its own copy of what it's given. Which choice is picked is set elsewhere.
+fn fixed_texts(window: HWND, pages: &[HWND], page: HWND) {
+    let control = |id: i32| pages.iter().chain(std::iter::once(&page)).find_map(|&page| unsafe { GetDlgItem(Some(page), id).ok() });
+    unsafe {
+        if let Ok(sections) = GetDlgItem(Some(window), IDC_SECTIONS) {
+            let chosen = SendMessageW(sections, LB_GETCURSEL, None, None).0;
+            SendMessageW(sections, LB_RESETCONTENT, None, None);
+            for (name, _, _) in SECTIONS {
+                let name = HSTRING::from(text::t(name));
+                SendMessageW(sections, LB_ADDSTRING, None, Some(LPARAM(name.as_ptr() as isize)));
+            }
+            if chosen >= 0 {
+                SendMessageW(sections, LB_SETCURSEL, Some(WPARAM(chosen as usize)), None);
+            }
+            chrome::name_for_screen_readers(sections, tr!("Settings pages"));
+        }
+    }
+    let combo = |id: i32, choices: &[&str]| {
+        if let Some(combo) = control(id) {
+            unsafe {
+                SendMessageW(combo, CB_RESETCONTENT, None, None);
+                for choice in choices {
+                    let choice = HSTRING::from(*choice);
+                    SendMessageW(combo, CB_ADDSTRING, None, Some(LPARAM(choice.as_ptr() as isize)));
+                }
+            }
+        }
+    };
+    combo(IDC_LAUNCH_EFFECT, &[tr!("None"), tr!("Bounce"), tr!("Glow pulse")]);
+    combo(IDC_LOOK, &[tr!("Light"), tr!("Dark"), tr!("Glass"), tr!("Frosted"), tr!("Capsule")]);
+    combo(IDC_SHOW_LABELS, &[tr!("Never"), tr!("On hover"), tr!("Always")]);
+    combo(IDC_RESTING, &[tr!("Slides out of sight"), tr!("Stays out, behind windows"), tr!("Stays out, on top of windows")]);
+    combo(IDC_EDGE, &[tr!("Top"), tr!("Bottom"), tr!("Left"), tr!("Right")]);
+    combo(IDC_HOVER_GLOW, &[tr!("None"), tr!("Windows accent colour"), tr!("Each icon's own colour")]);
+    combo(IDC_RUN, &[tr!("Normal window"), tr!("Minimised"), tr!("Maximised")]);
+    // Windows' own choice first (named in its own language), then each language by its own name.
+    let windows_language = tr!("Windows' language ({name})", name = LANGUAGES[text::windows_choice()].name);
+    let languages: Vec<&str> = std::iter::once(windows_language.as_str()).chain(LANGUAGES.iter().map(|language| language.name)).collect();
+    combo(IDC_LANGUAGE, &languages);
+    if let Some(list) = control(IDC_REMOVED_LIST) {
+        column_titles(list, &[tr!("Name"), tr!("Removed"), tr!("Was in")]);
+    }
+    if let Some(list) = control(IDC_VERSIONS_LIST) {
+        column_titles(list, &[tr!("Saved"), tr!("Kind"), tr!("Items")]);
+    }
+    // Names for screen readers where the label before a control doesn't give a good one.
+    for &page in pages {
+        for (id, name) in [
+            (IDC_LIST, tr!("Your dock's items")),
+            (IDC_TARGET_BROWSE, tr!("Browse for the target")),
+            (IDC_START_BROWSE, tr!("Browse for the start-in folder")),
+            (IDC_REMOVED_LIST, tr!("Recently removed items")),
+            (IDC_VERSIONS_LIST, tr!("Saved versions of your dock")),
+        ] {
+            if let Ok(control) = unsafe { GetDlgItem(Some(page), id) } {
+                chrome::name_for_screen_readers(control, name);
+            }
         }
     }
 }
@@ -656,6 +780,9 @@ pub fn run(home: Home, open: Open) -> i32 {
         if !first {
             return 0; // the other copy is stuck: don't add a second window
         }
+        // The language dock.toml names, or Windows' own (this process starts before the dock's
+        // start-up would read it).
+        text::use_setting(&config::load(&home.config()).map(|parsed| parsed.config.dock.language).unwrap_or_default());
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -670,18 +797,16 @@ pub fn run(home: Home, open: Open) -> i32 {
                 let Ok(window) = CreateDialogParamW(Some(instance.into()), template(IDD_SETTINGS), None, Some(window_proc), LPARAM(0)) else {
                     return 1;
                 };
+                text::translate_dialog(window);
                 // Each section's page fills the page area of the window (dialog units to pixels).
                 let mut area = RECT { left: 94, top: 26, right: 464, bottom: 272 };
                 let _ = MapDialogRect(window, &mut area);
-                let sections = GetDlgItem(Some(window), IDC_SECTIONS).ok();
-                for (name, id, _) in SECTIONS {
+                for (_, id, _) in SECTIONS {
                     let Ok(page) = CreateDialogParamW(Some(instance.into()), template(id), Some(window), Some(page_proc), LPARAM(0)) else {
                         return 1;
                     };
+                    text::translate_dialog(page);
                     let _ = SetWindowPos(page, None, area.left, area.top, area.right - area.left, area.bottom - area.top, SWP_NOZORDER);
-                    if let Some(sections) = sections {
-                        SendMessageW(sections, LB_ADDSTRING, None, Some(LPARAM(name.as_ptr() as isize)));
-                    }
                     pages.push(page);
                 }
                 for slider in &SLIDERS {
@@ -692,28 +817,15 @@ pub fn run(home: Home, open: Open) -> i32 {
                     SendMessageW(control, TBM_SETLINESIZE, None, Some(LPARAM(1)));
                     SendMessageW(control, TBM_SETPAGESIZE, None, Some(LPARAM((steps / 10).max(1))));
                 }
-                let combo = |id: i32, choices: &[PCWSTR]| {
-                    if let Some(combo) = pages.iter().find_map(|&page| GetDlgItem(Some(page), id).ok()) {
-                        for choice in choices {
-                            SendMessageW(combo, CB_ADDSTRING, None, Some(LPARAM(choice.as_ptr() as isize)));
-                        }
-                    }
-                };
-                combo(IDC_LAUNCH_EFFECT, &[w!("None"), w!("Bounce"), w!("Glow pulse")]);
-                combo(IDC_LOOK, &[w!("Light"), w!("Dark"), w!("Glass"), w!("Frosted"), w!("Capsule")]);
-                combo(IDC_SHOW_LABELS, &[w!("Never"), w!("On hover"), w!("Always")]);
-                combo(IDC_RESTING, &[w!("Slides out of sight"), w!("Stays out, behind windows"), w!("Stays out, on top of windows")]);
-                combo(IDC_EDGE, &[w!("Top"), w!("Bottom"), w!("Left"), w!("Right")]);
-                combo(IDC_HOVER_GLOW, &[w!("None"), w!("Windows accent colour"), w!("Each icon's own colour")]);
                 if let Ok(shortcut) = GetDlgItem(Some(pages[SECTION_SCREEN]), IDC_SHORTCUT) {
                     let instead = (hotkey::HOTKEYF_CONTROL | hotkey::HOTKEYF_SHIFT) as isize;
                     SendMessageW(shortcut, HKM_SETRULES, Some(WPARAM((HKCOMB_NONE | HKCOMB_S) as usize)), Some(LPARAM(instead)));
                 }
                 if let Ok(list) = GetDlgItem(Some(pages[SECTION_REMOVED]), IDC_REMOVED_LIST) {
-                    columns(list, &[(w!("Name"), 0.45), (w!("Removed"), 0.30), (w!("Was in"), 0.25)]);
+                    columns(list, &[0.45, 0.30, 0.25]);
                 }
                 if let Ok(list) = GetDlgItem(Some(pages[SECTION_VERSIONS]), IDC_VERSIONS_LIST) {
-                    columns(list, &[(w!("Saved"), 0.36), (w!("Kind"), 0.44), (w!("Items"), 0.20)]);
+                    columns(list, &[0.36, 0.44, 0.20]);
                 }
                 // The finish: the title's and headings' fonts, the About page's icon.
                 style(window, &pages);
@@ -731,6 +843,7 @@ pub fn run(home: Home, open: Open) -> i32 {
                 else {
                     return 1;
                 };
+                text::translate_dialog(window);
                 (window, window)
             }
         };
@@ -756,29 +869,7 @@ pub fn run(home: Home, open: Open) -> i32 {
             }
             _ => None,
         };
-        if let Ok(run) = GetDlgItem(Some(page), IDC_RUN) {
-            for choice in [w!("Normal window"), w!("Minimised"), w!("Maximised")] {
-                SendMessageW(run, CB_ADDSTRING, None, Some(LPARAM(choice.as_ptr() as isize)));
-            }
-        }
-
-        // Names for screen readers where the label before a control doesn't give a good one.
-        if let Ok(sections) = GetDlgItem(Some(window), IDC_SECTIONS) {
-            chrome::name_for_screen_readers(sections, "Settings pages");
-        }
-        for &page in &pages {
-            for (id, name) in [
-                (IDC_LIST, "Your dock's items"),
-                (IDC_TARGET_BROWSE, "Browse for the target"),
-                (IDC_START_BROWSE, "Browse for the start-in folder"),
-                (IDC_REMOVED_LIST, "Recently removed items"),
-                (IDC_VERSIONS_LIST, "Saved versions of your dock"),
-            ] {
-                if let Ok(control) = GetDlgItem(Some(page), id) {
-                    chrome::name_for_screen_readers(control, name);
-                }
-            }
-        }
+        fixed_texts(window, &pages, page);
         let store = Store::new(&home);
         let opening = config::read_text(store.config_path()).unwrap_or_default();
         let removed = Removed::new(&home);
@@ -894,7 +985,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         WM_DRAWITEM if wparam.0 == IDC_SECTIONS as usize => {
             let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
             if let Some((name, _, symbol)) = SECTIONS.get(item.itemID as usize) {
-                chrome::draw_row(item, unsafe { name.as_wide() }, *symbol);
+                let name: Vec<u16> = text::t(name).encode_utf16().collect();
+                chrome::draw_row(item, &name, *symbol);
             }
             1
         }
@@ -1085,43 +1177,43 @@ fn answer(ask: Ask) {
     match ask {
         Ask::Target(spot, expect, start) => {
             if let Some(path) = pickers::choose_target(Some(window), &start) {
-                with_settings(|s| s.set_field(spot, &expect, "target", &path, "Target"));
+                with_settings(|s| s.set_field(spot, &expect, "target", &path));
             }
         }
         Ask::StartIn(spot, expect, start) => {
             if let Some(path) = pickers::choose_folder(Some(window), &start) {
-                with_settings(|s| s.set_field(spot, &expect, "start_in", &path, "Start in"));
+                with_settings(|s| s.set_field(spot, &expect, "start_in", &path));
             }
         }
         Ask::Icon(spot, expect, stored, current, program) => {
             // Each icon clicked is saved, so the dock shows it; Cancel puts the stored one back.
-            let title = format!("Choose an icon for {expect}");
+            let title = tr!("Choose an icon for {name}", name = expect);
             let request = iconpicker::Request { owner: window, title, program, current };
             let label = expect.clone();
             let kept = iconpicker::choose(request, move |icon| {
-                with_settings(|s| s.set_field(spot, &label, "icon", icon, "Icon"));
+                with_settings(|s| s.set_field(spot, &label, "icon", icon));
             });
             if !kept {
                 with_settings(|s| {
-                    s.set_field(spot, &expect, "icon", &stored, "Icon");
-                    s.status("Icon unchanged.");
+                    s.set_field(spot, &expect, "icon", &stored);
+                    s.status(tr!("Icon unchanged."));
                 });
             }
         }
         Ask::Add(gap, at, has_bin) => {
             // Into a group: files and folders (a group holds things to open).
-            let mut entries = vec![(ADD_FILE, item("File...")), (ADD_FOLDER, item("Folder..."))];
+            let mut entries = vec![(ADD_FILE, item(tr!("File..."))), (ADD_FOLDER, item(tr!("Folder...")))];
             if gap.child.is_none() {
-                entries.push((ADD_SEPARATOR, item("Separator")));
+                entries.push((ADD_SEPARATOR, item(tr!("Separator"))));
                 if !has_bin {
-                    entries.push((ADD_BIN, item("Recycle Bin")));
+                    entries.push((ADD_BIN, item(tr!("Recycle Bin"))));
                 }
             }
             // Windows items (This PC, Downloads, Settings…): into a group too.
             let windows = places::all();
             let windows_entries: Vec<(usize, String)> =
                 windows.iter().enumerate().map(|(k, place)| place.as_ref().map_or((0, String::new()), |place| (ADD_WINDOWS + k, place.name.clone()))).collect();
-            let new: Vec<ItemConfig> = match pop_menu_with(page, at, &entries, Some(("Windows item", &windows_entries))) {
+            let new: Vec<ItemConfig> = match pop_menu_with(page, at, &entries, Some((tr!("Windows item"), &windows_entries))) {
                 choice if (ADD_WINDOWS..ADD_WINDOWS + windows.len()).contains(&choice) => windows[choice - ADD_WINDOWS].iter().cloned().collect(),
                 ADD_FILE => pickers::choose_files(Some(window)).iter().map(|path| drop::item_for_path(path, &home)).collect(),
                 ADD_FOLDER => pickers::choose_folder(Some(window), "").iter().map(|path| drop::item_for_path(path, &home)).collect(),
@@ -1148,12 +1240,12 @@ fn answer(ask: Ask) {
             }
         }
         Ask::SaveCopy => {
-            if let Some(path) = pickers::choose_save(Some(window), "Save a copy of your dock", "My dock.toml", "Dock files", "*.toml") {
+            if let Some(path) = pickers::choose_save(Some(window), tr!("Save a copy of your dock"), "My dock.toml", tr!("Dock files"), "*.toml") {
                 with_settings(|s| s.save_copy(&path));
             }
         }
         Ask::LoadCopy => {
-            if let Some(path) = pickers::choose_file(Some(window), "Load a copy of a dock", "Dock files", "*.toml") {
+            if let Some(path) = pickers::choose_file(Some(window), tr!("Load a copy of a dock"), tr!("Dock files"), "*.toml") {
                 with_settings(|s| s.load_copy(&path));
             }
         }
@@ -1162,12 +1254,12 @@ fn answer(ask: Ask) {
             let here = import::RocketDock::from_registry().ok().filter(|rocketdock| !rocketdock.icons.is_empty());
             let mut entries = Vec::new();
             if here.is_some() {
-                entries.push((1, item("From RocketDock on this PC")));
+                entries.push((1, item(tr!("From RocketDock on this PC"))));
             }
-            entries.push((2, item("From a RocketDock settings file (.reg)...")));
+            entries.push((2, item(tr!("From a RocketDock settings file (.reg)..."))));
             let source = match pop_menu(page, at, &entries) {
                 1 => here.map(Ok),
-                2 => pickers::choose_file(Some(window), "RocketDock's settings", "Registry files", "*.reg")
+                2 => pickers::choose_file(Some(window), tr!("RocketDock's settings"), tr!("Registry files"), "*.reg")
                     .map(|path| import::RocketDock::from_reg_file(Path::new(&path))),
                 _ => None,
             };
@@ -1215,11 +1307,12 @@ impl Settings {
                 self.dock = parsed.config.dock;
             }
             Err(e) => {
-                self.status(&format!("Your dock's file can't be read right now: {e}"));
+                self.status(&tr!("Your dock's file can't be read right now: {error}", error = e));
                 return;
             }
         }
         self.now = text;
+        self.follow_language();
         self.rows = self
             .items
             .iter()
@@ -1232,6 +1325,25 @@ impl Settings {
         self.fill_properties();
         self.fill_sections();
         self.fill_page(self.section);
+    }
+
+    /// Switches the window to the language dock.toml names, if that's another one (chosen here,
+    /// put back by Revert, or set elsewhere): the dialogs' own texts, and the lists and choices
+    /// the code fills. The rest follows as the file is read (`reload_model` fills the items, the
+    /// properties, the sliders and the page showing; the other pages are filled as they're shown).
+    fn follow_language(&mut self) {
+        if LANGUAGES[text::chosen(&self.dock.language)].code == text::current().code {
+            return;
+        }
+        text::use_setting(&self.dock.language);
+        text::translate_dialog(self.window);
+        for &page in &self.pages {
+            text::translate_dialog(page);
+        }
+        fixed_texts(self.window, &self.pages, self.page);
+        if self.mode == Mode::Settings {
+            set_text(self.window, IDC_TITLE, text::t(SECTIONS[self.section].0));
+        }
     }
 
     // ---- Sections ---------------------------------------------------------------------------
@@ -1250,8 +1362,8 @@ impl Settings {
             if let Ok(sections) = GetDlgItem(Some(self.window), IDC_SECTIONS) {
                 SendMessageW(sections, LB_SETCURSEL, Some(WPARAM(section)), None);
             }
-            let _ = SetDlgItemTextW(self.window, IDC_TITLE, SECTIONS[section].0);
         }
+        set_text(self.window, IDC_TITLE, text::t(SECTIONS[section].0));
         self.fill_page(section);
     }
 
@@ -1273,15 +1385,19 @@ impl Settings {
         let Some(&page) = self.pages.get(SECTION_SCREEN) else { return };
         let screens = system::screens();
         let chosen = self.dock.monitor.clone();
-        let mut choices: Vec<(String, String)> = vec![("main".into(), "The main screen".into())];
+        let mut choices: Vec<(String, String)> = vec![("main".into(), tr!("The main screen").into())];
         for screen in &screens {
             let (width, height) = (screen.monitor.right - screen.monitor.left, screen.monitor.bottom - screen.monitor.top);
-            let main = if screen.main { " (the main screen)" } else { "" };
-            choices.push((screen.id.clone(), format!("Screen {}: {width} × {height}{main}", screen.number)));
+            let label = if screen.main {
+                tr!("Screen {number}: {width} × {height} (the main screen)", number = screen.number, width = width, height = height)
+            } else {
+                tr!("Screen {number}: {width} × {height}", number = screen.number, width = width, height = height)
+            };
+            choices.push((screen.id.clone(), label));
         }
         let mut selected = if chosen.eq_ignore_ascii_case("main") { Some(0) } else { choices.iter().position(|(id, _)| id.eq_ignore_ascii_case(&chosen)) };
         if selected.is_none() {
-            choices.push((chosen.clone(), "A screen that isn't plugged in (the main screen meanwhile)".into()));
+            choices.push((chosen.clone(), tr!("A screen that isn't plugged in (the main screen meanwhile)").into()));
             selected = Some(choices.len() - 1);
         }
         unsafe {
@@ -1324,7 +1440,7 @@ impl Settings {
         let Some(key) = hotkey::from_control(value) else { return }; // still being pressed (Ctrl, Shift…)
         let text = hotkey::format(key);
         if let Err(e) = hotkey::parse(&text) {
-            set_text(page, IDC_SHORTCUT_NOTE, &format!("{e}."));
+            set_text(page, IDC_SHORTCUT_NOTE, &tr!("{error}.", error = e));
             return;
         }
         if text == self.dock.hotkey {
@@ -1336,28 +1452,34 @@ impl Settings {
         const TRY: i32 = 0xBFFF;
         let free = unsafe { RegisterHotKey(None, TRY, HOT_KEY_MODIFIERS(key.modifiers | hotkey::MOD_NOREPEAT), key.key).is_ok() };
         if !free {
-            set_text(page, IDC_SHORTCUT_NOTE, &format!("Another program already uses {text}. Choose another."));
+            set_text(page, IDC_SHORTCUT_NOTE, &tr!("Another program already uses {shortcut}. Choose another.", shortcut = text));
             return;
         }
         unsafe {
             let _ = UnregisterHotKey(None, TRY);
         }
         set_text(page, IDC_SHORTCUT_NOTE, "");
-        self.change(&format!("Shortcut {text}"), None, false, |doc| edit::set_dock(doc, "hotkey", text.as_str()));
+        let saved = tr!("Shortcut {shortcut}: saved.", shortcut = text);
+        let not_saved = |e: String| tr!("Shortcut {shortcut} wasn't saved. {error}", shortcut = text, error = e);
+        self.change(&saved, not_saved, None, false, |doc| edit::set_dock(doc, "hotkey", text.as_str()));
     }
 
     /// About: the version, and what the dock is using right now.
     fn fill_about(&mut self) {
         let page = self.pages[SECTION_ABOUT];
-        set_text(page, IDC_VERSION, &format!("Version {}", env!("CARGO_PKG_VERSION")));
+        set_text(page, IDC_VERSION, &tr!("Version {version}", version = env!("CARGO_PKG_VERSION")));
         let memory = match system::dock_memory() {
-            Some((dock, watchdog)) => {
-                let watchdog = watchdog.map_or(String::new(), |w| {
-                    format!(", plus {w:.1} MB for its watchdog (which starts it again if it ever stops): {:.1} MB in all", dock + w)
-                });
-                format!("The dock is using {dock:.1} MB of memory{watchdog}. This window runs separately and uses no memory once it's closed.")
-            }
-            None => "The dock isn't running.".to_string(),
+            Some((dock, Some(watchdog))) => tr!(
+                "The dock is using {memory} MB of memory, plus {watchdog} MB for its watchdog (which starts it again if it ever stops): {total} MB in all. This window runs separately and uses no memory once it's closed.",
+                memory = text::number(dock as f64, 1),
+                watchdog = text::number(watchdog as f64, 1),
+                total = text::number((dock + watchdog) as f64, 1),
+            ),
+            Some((dock, None)) => tr!(
+                "The dock is using {memory} MB of memory. This window runs separately and uses no memory once it's closed.",
+                memory = text::number(dock as f64, 1),
+            ),
+            None => tr!("The dock isn't running.").to_string(),
         };
         set_text(page, IDC_MEMORY, &memory);
         set_text(page, IDC_HEART, "\u{2665}");
@@ -1388,12 +1510,17 @@ impl Settings {
         let newer = status.latest_version().filter(|&version| update::is_newer(version, update::this_version()));
         let installed = Settings::installed_copy();
         let text = match (self.update_busy, newer) {
-            (Some(busy), _) => busy.to_string(),
-            _ if !status.error.is_empty() => format!("{} (Tried {}.)", status.error, status.checked),
-            (None, Some(version)) if installed => format!("Desktop Dock {} is out. Update now installs it; your dock stays just as it is.", update::shown(version)),
-            (None, Some(version)) => format!("Desktop Dock {} is out. This copy isn't the installed one, so get the new one from GitHub (What's new).", update::shown(version)),
-            (None, None) if !status.checked.is_empty() => format!("You have the newest version. Checked {}.", status.checked),
-            (None, None) => "Not checked yet. Checking asks GitHub which version is the newest; nothing about you or your PC is sent.".to_string(),
+            (Some(busy), _) => text::t(busy).to_string(),
+            _ if !status.error.is_empty() => tr!("{error} (Tried {when}.)", error = status.error, when = text::when(&status.checked)),
+            (None, Some(version)) if installed => {
+                tr!("Desktop Dock {version} is out. Update now installs it; your dock stays just as it is.", version = update::shown(version))
+            }
+            (None, Some(version)) => tr!(
+                "Desktop Dock {version} is out. This copy isn't the installed one, so get the new one from GitHub (What's new).",
+                version = update::shown(version)
+            ),
+            (None, None) if !status.checked.is_empty() => tr!("You have the newest version. Checked {when}.", when = text::when(&status.checked)),
+            (None, None) => tr!("Not checked yet. Checking asks GitHub which version is the newest; nothing about you or your PC is sent.").to_string(),
         };
         set_text(self.pages[SECTION_ABOUT], IDC_UPDATE_STATUS, &text);
         for (id, on) in [(IDC_UPDATE_NOW, newer.is_some() && installed && self.update_busy.is_none()), (IDC_CHECK_NOW, self.update_busy.is_none())] {
@@ -1416,13 +1543,14 @@ impl Settings {
         if install && !(Settings::installed_copy() && version.is_some_and(|version| update::is_newer(version, update::this_version()))) {
             return;
         }
-        self.update_busy = Some(if install { "Downloading the new version..." } else { "Checking..." });
+        self.update_busy = Some(if install { n!("Downloading the new version...") } else { n!("Checking...") });
         self.show_update_status();
         let (home, done, found, page) = (self.home.dir.clone(), self.update_done.clone(), self.update_found.clone(), self.pages[SECTION_ABOUT].0 as isize);
         std::thread::spawn(move || {
             let outcome = match (install, version) {
-                (true, Some(version)) => update::install(version, &home)
-                    .map(|()| format!("Installing Desktop Dock {}: the dock closes and starts again in a moment.", update::shown(version))),
+                (true, Some(version)) => update::install(version, &home).map(|()| {
+                    tr!("Installing Desktop Dock {version}: the dock closes and starts again in a moment.", version = update::shown(version))
+                }),
                 _ => {
                     let status = update::check_and_keep(&home);
                     if let Ok(mut slot) = found.lock() {
@@ -1558,6 +1686,8 @@ impl Settings {
                 HoverGlow::Icon => 2,
             },
         );
+        // Windows' language first, then each language the dock has.
+        pick(IDC_LANGUAGE, LANGUAGES.iter().position(|language| language.code.eq_ignore_ascii_case(&self.dock.language)).map_or(0, |k| k + 1));
         if let Some(label_size) = self.control(IDC_LABEL_SIZE) {
             unsafe {
                 let _ = EnableWindow(label_size, self.dock.show_labels);
@@ -1611,9 +1741,11 @@ impl Settings {
             self.fill_sections();
             return;
         }
-        let what = changed.iter().map(|(slider, _)| slider.what).collect::<Vec<_>>().join(", ");
+        let names = changed.iter().map(|(slider, _)| text::t(slider.what)).collect::<Vec<_>>().join(", ");
         let show = changed.iter().any(|(slider, _)| PREVIEWED.contains(&slider.key));
-        self.change(&what, None, show, |doc| {
+        let saved = tr!("{settings}: saved.", settings = names);
+        let not_saved = |e: String| tr!("{settings} wasn't saved. {error}", settings = names, error = e);
+        self.change(&saved, not_saved, None, show, |doc| {
             for (slider, value) in &changed {
                 edit::set_dock(doc, slider.key, toml_number(*value))?;
             }
@@ -1638,7 +1770,7 @@ impl Settings {
             (Some(row), _) => self.selected = Some(self.rows[row]),
             (None, Mode::Properties) => {
                 self.selected = None;
-                self.status(&format!("{label} isn't on the dock any more."));
+                self.status(&tr!("{name} isn't on the dock any more.", name = label));
             }
             (None, Mode::Settings) => self.selected = self.rows.get(was_row.min(self.rows.len().saturating_sub(1))).copied(),
         }
@@ -1657,8 +1789,8 @@ impl Settings {
             for (row, &spot) in self.rows.iter().enumerate() {
                 let Some(item) = self.at(spot) else { continue };
                 let label = match item.kind {
-                    Kind::Separator => "(separator)".to_string(),
-                    _ => edit::label_of(item),
+                    Kind::Separator => tr!("(separator)").to_string(),
+                    _ => edit::shown_label_of(item),
                 };
                 let mut text: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
                 let image = self.image_index.get(&self.sources(item)).copied().unwrap_or(-1);
@@ -1729,11 +1861,11 @@ impl Settings {
         let named = matches!(kind, Some(Kind::App | Kind::RecycleBin | Kind::Group));
         if self.mode == Mode::Properties {
             let title = match &item {
-                Some(item) => format!("{} properties", edit::label_of(item)),
-                None => "Properties".into(),
+                Some(item) => wtr!("{name} properties", name = edit::shown_label_of(item)),
+                None => wtr!("Properties"),
             };
             unsafe {
-                let _ = SetWindowTextW(self.window, &HSTRING::from(title));
+                let _ = SetWindowTextW(self.window, &title);
             }
         }
         let item = item.unwrap_or_default();
@@ -1773,18 +1905,27 @@ impl Settings {
         enable(page, IDC_DOWN, place.is_some_and(|p| p + 1 < siblings));
         enable(page, IDC_GROUP, kind.is_some_and(|kind| kind != Kind::Separator));
         let group_name = spot.and_then(|spot| spot.child.and(self.items.get(spot.index))).map(edit::label_of);
-        let note = match (kind, group_name) {
-            (None, _) => String::new(),
-            (Some(Kind::Separator), _) => "A separator: nothing to set. Move it with Up and Down.".into(),
-            (Some(Kind::Group), _) => format!(
-                "A group with {}. Its icon shows the first four, unless you give it one of its own.",
-                plural(item.items.len(), "item", "items")
+        let own_icon = match kind {
+            Some(Kind::App | Kind::RecycleBin) if !item.icon.trim().is_empty() => Some(icon_from(&self.home, &item.icon)),
+            _ => None,
+        };
+        let note = match (kind, group_name, own_icon) {
+            (None, ..) => String::new(),
+            (Some(Kind::Separator), ..) => tr!("A separator: nothing to set. Move it with Up and Down.").into(),
+            (Some(Kind::Group), ..) => trn!(
+                "A group with {n} item. Its icon shows the first four, unless you give it one of its own.",
+                "A group with {n} items. Its icon shows the first four, unless you give it one of its own.",
+                item.items.len()
             ),
-            (Some(_), Some(group)) if !item.icon.trim().is_empty() => format!("In {group}. Icon: {}.", icon_in_words(&self.home, &item.icon)),
-            (Some(_), Some(group)) => format!("In {group}. Icon: default."),
-            (Some(_), None) if !item.icon.trim().is_empty() => format!("Icon: {}.", icon_in_words(&self.home, &item.icon)),
-            (Some(Kind::RecycleBin), None) => "Icon: Windows' own, empty or full.".into(),
-            (Some(_), None) => "Icon: default.".into(),
+            (Some(_), Some(group), Some(IconFrom::Windows)) => tr!("In {group}. Icon: one of Windows' own.", group = group),
+            (Some(_), Some(group), Some(IconFrom::Program(program))) => tr!("In {group}. Icon: from {program}.", group = group, program = program),
+            (Some(_), Some(group), Some(IconFrom::Image(file))) => tr!("In {group}. Icon: {file}.", group = group, file = file),
+            (Some(_), Some(group), None) => tr!("In {group}. Icon: default.", group = group),
+            (Some(_), None, Some(IconFrom::Windows)) => tr!("Icon: one of Windows' own.").into(),
+            (Some(_), None, Some(IconFrom::Program(program))) => tr!("Icon: from {program}.", program = program),
+            (Some(_), None, Some(IconFrom::Image(file))) => tr!("Icon: {file}.", file = file),
+            (Some(Kind::RecycleBin), None, None) => tr!("Icon: Windows' own, empty or full.").into(),
+            (Some(_), None, None) => tr!("Icon: default.").into(),
         };
         set_text(page, IDC_NOTE, &note);
         let changed = match self.mode {
@@ -1800,8 +1941,8 @@ impl Settings {
     }
 
     /// What the text box `id` holds in the file now, if it's one of the text boxes.
-    fn saved_value(&self, id: i32) -> Option<(&'static str, &'static str, String)> {
-        let (_, key, what) = FIELDS.iter().find(|(field, _, _)| *field == id)?;
+    fn saved_value(&self, id: i32) -> Option<(&'static str, String)> {
+        let (_, key) = FIELDS.iter().find(|(field, _)| *field == id)?;
         let item = self.at(self.selected?)?;
         let value = match *key {
             "name" => &item.name,
@@ -1809,12 +1950,12 @@ impl Settings {
             "args" => &item.args,
             _ => &item.start_in,
         };
-        Some((key, what, value.clone()))
+        Some((key, value.clone()))
     }
 
     fn focused_field(&self) -> Option<i32> {
         let id = unsafe { GetDlgCtrlID(GetFocus()) };
-        FIELDS.iter().any(|(field, _, _)| *field == id).then_some(id)
+        FIELDS.iter().any(|(field, _)| *field == id).then_some(id)
     }
 
     /// Saves the text box you're in (Enter, or closing the window).
@@ -1827,19 +1968,19 @@ impl Settings {
     fn save_field(&mut self, id: i32) {
         let Some(spot) = self.selected else { return };
         let Some(expect) = self.label(spot) else { return };
-        if let Some((key, what, saved)) = self.saved_value(id) {
+        if let Some((key, saved)) = self.saved_value(id) {
             let typed = text_of(self.page, id);
             if typed.trim() == shown_value(key, &saved).trim() {
                 return; // as shown: nothing typed (a folder shown by its path keeps its shell name)
             }
-            self.set_field(spot, &expect, key, typed.trim(), what);
+            self.set_field(spot, &expect, key, typed.trim());
         }
     }
 
     /// Esc while typing: puts the box back as saved. True if there was typing to discard.
     fn discard_typing(&mut self) -> bool {
         let Some(id) = self.focused_field() else { return false };
-        let Some((key, _, saved)) = self.saved_value(id) else { return false };
+        let Some((key, saved)) = self.saved_value(id) else { return false };
         let shown = shown_value(key, &saved);
         if text_of(self.page, id).trim() == shown.trim() {
             return false;
@@ -1883,11 +2024,12 @@ impl Settings {
                     2 => RunState::Maximized,
                     _ => RunState::Normal,
                 };
-                self.set_field(spot, &expect, "run", run_word(run), "Run");
+                self.set_field(spot, &expect, "run", run_word(run));
             }
             (IDC_ADMIN, BN_CLICKED) => {
                 let on = unsafe { IsDlgButtonChecked(self.page, IDC_ADMIN) } == BST_CHECKED.0;
-                self.change("Run as administrator", None, false, |doc| edit::set_flag(doc, spot, &expect, "admin", on));
+                let not_saved = |e: String| tr!("Run as administrator wasn't saved. {error}", error = e);
+                self.change(tr!("Run as administrator: saved."), not_saved, None, false, |doc| edit::set_flag(doc, spot, &expect, "admin", on));
             }
             (IDC_TARGET_BROWSE, BN_CLICKED) => return Some(Ask::Target(spot, expect, self.home.resolve(&item.target))),
             (IDC_START_BROWSE, BN_CLICKED) => {
@@ -1908,11 +2050,11 @@ impl Settings {
                 let program = Some(self.home.resolve(item.launch_target())).filter(|path| [".exe", ".dll"].iter().any(|e| path.to_ascii_lowercase().ends_with(e)));
                 return Some(Ask::Icon(spot, expect, item.icon.clone(), current, program));
             }
-            (IDC_ICON_RESET, BN_CLICKED) => self.set_field(spot, &expect, "icon", "", "Icon"),
+            (IDC_ICON_RESET, BN_CLICKED) => self.set_field(spot, &expect, "icon", ""),
             (IDC_OPEN_LOCATION, BN_CLICKED) => {
                 let path = places::on_disk(&self.home, item.launch_target());
                 if let Err(e) = system::open_location(&path) {
-                    self.status(&format!("Can't open its file location. {e}"));
+                    self.status(&tr!("Can't open its file location. {error}", error = e));
                 }
             }
             (IDC_REMOVE, BN_CLICKED) => self.remove_selected(),
@@ -1930,7 +2072,8 @@ impl Settings {
             (IDC_SHOW_LABELS, CBN_SELCHANGE) => {
                 // Never, On hover (the name under the icon you point at), Always (every name).
                 let choice = self.control(IDC_SHOW_LABELS).map_or(1, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
-                self.change("Show names", None, true, |doc| {
+                let not_saved = |e: String| tr!("Show names wasn't saved. {error}", error = e);
+                self.change(tr!("Show names: saved."), not_saved, None, true, |doc| {
                     edit::set_dock(doc, "show_labels", choice != 0)?;
                     edit::set_dock(doc, "always_show_labels", choice == 2)
                 });
@@ -1947,12 +2090,14 @@ impl Settings {
                     2 => "glow",
                     _ => "bounce",
                 };
-                self.change("Launch effect", None, false, |doc| edit::set_dock(doc, "launch_effect", word));
+                let not_saved = |e: String| tr!("Launch effect wasn't saved. {error}", error = e);
+                self.change(tr!("Launch effect: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "launch_effect", word));
             }
             (IDC_SCREEN_LIST, CBN_SELCHANGE) => {
                 let choice = self.control(IDC_SCREEN_LIST).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } as usize);
                 if let Some(id) = self.screen_choices.get(choice).cloned().filter(|id| !id.eq_ignore_ascii_case(&self.dock.monitor)) {
-                    self.change("Screen", None, true, |doc| edit::set_dock(doc, "monitor", id.as_str()));
+                    let not_saved = |e: String| tr!("Screen wasn't saved. {error}", error = e);
+                    self.change(tr!("Screen: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "monitor", id.as_str()));
                     self.fill_screen();
                 }
             }
@@ -1963,7 +2108,8 @@ impl Settings {
                     }
                 }
                 if !self.dock.hotkey.is_empty() {
-                    self.change("No shortcut", None, false, |doc| edit::set_dock(doc, "hotkey", ""));
+                    let not_saved = |e: String| tr!("No shortcut wasn't saved. {error}", error = e);
+                    self.change(tr!("No shortcut: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "hotkey", ""));
                 }
                 self.fill_screen();
             }
@@ -1974,7 +2120,8 @@ impl Settings {
                     2 => "icon",
                     _ => "none",
                 };
-                self.change("Hover glow", None, true, |doc| edit::set_dock(doc, "hover_glow", word));
+                let not_saved = |e: String| tr!("Hover glow wasn't saved. {error}", error = e);
+                self.change(tr!("Hover glow: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "hover_glow", word));
             }
             (IDC_LOOK, CBN_SELCHANGE) => {
                 // Light and Dark are the classic style's two looks; the others are styles of their
@@ -1987,7 +2134,8 @@ impl Settings {
                     4 => ("capsule", None),
                     _ => ("classic", Some("light")),
                 };
-                self.change("Dock look", None, true, |doc| {
+                let not_saved = |e: String| tr!("Dock look wasn't saved. {error}", error = e);
+                self.change(tr!("Dock look: saved."), not_saved, None, true, |doc| {
                     edit::set_dock(doc, "style", style)?;
                     match look {
                         Some(look) => edit::set_dock(doc, "look", look),
@@ -1995,17 +2143,31 @@ impl Settings {
                     }
                 });
             }
+            (IDC_LANGUAGE, CBN_SELCHANGE) => {
+                // Windows' own language ("auto"), then the dock's languages in their order. The
+                // window switches to it as the file is read again (`follow_language`).
+                let choice = self.control(IDC_LANGUAGE).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } as usize);
+                let code = choice.checked_sub(1).and_then(|k| LANGUAGES.get(k)).map_or("auto", |language| language.code);
+                if !code.eq_ignore_ascii_case(&self.dock.language) {
+                    let not_saved = |e: String| tr!("Language wasn't saved. {error}", error = e);
+                    if self.change(tr!("Language: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "language", code)) {
+                        self.status(tr!("Language: saved.")); // again, now in the language chosen
+                    }
+                }
+            }
             (IDC_EDGE, CBN_SELCHANGE) => {
                 let choice = self.control(IDC_EDGE).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } as usize);
                 let (word, _) = Edge::NAMES[choice.min(Edge::NAMES.len() - 1)];
-                self.change("Screen edge", None, true, |doc| edit::set_dock(doc, "edge", word));
+                let not_saved = |e: String| tr!("Screen edge wasn't saved. {error}", error = e);
+                self.change(tr!("Screen edge: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "edge", word));
                 self.fill_screen();
             }
             (IDC_TASKBAR_SETTINGS, BN_CLICKED) => launch::open(Path::new("ms-settings:taskbar")),
             (IDC_RESTING, CBN_SELCHANGE) => {
                 // Slides out of sight (auto_hide), or stays out behind windows or on top of them.
                 let choice = self.control(IDC_RESTING).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
-                self.change("When you're not using it", None, true, |doc| match choice {
+                let not_saved = |e: String| tr!("When you're not using it wasn't saved. {error}", error = e);
+                self.change(tr!("When you're not using it: saved."), not_saved, None, true, |doc| match choice {
                     1 | 2 => {
                         edit::set_dock(doc, "auto_hide", false)?;
                         edit::set_dock(doc, "stay_out", if choice == 2 { "on-top" } else { "behind-windows" })
@@ -2015,14 +2177,15 @@ impl Settings {
             }
             (IDC_LOCKED, BN_CLICKED) => {
                 let on = self.checked(IDC_LOCKED);
-                self.change("Lock icons", None, false, |doc| edit::set_dock(doc, "locked", on));
+                let not_saved = |e: String| tr!("Lock icons wasn't saved. {error}", error = e);
+                self.change(tr!("Lock icons: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "locked", on));
             }
             (IDC_STARTUP, BN_CLICKED) => {
                 // Not in dock.toml: the sign-in task in Task Scheduler (so Revert doesn't undo it).
                 let on = self.checked(IDC_STARTUP);
                 match crate::startup::set_starts_with_windows(on) {
-                    Ok(()) => self.status(if on { "Start with Windows: on." } else { "Start with Windows: off." }),
-                    Err(e) => self.status(&format!("Start with Windows wasn't changed. {e}")),
+                    Ok(()) => self.status(if on { tr!("Start with Windows: on.") } else { tr!("Start with Windows: off.") }),
+                    Err(e) => self.status(&tr!("Start with Windows wasn't changed. {error}", error = e)),
                 }
                 self.fill_sections();
             }
@@ -2036,13 +2199,14 @@ impl Settings {
             (IDC_EDIT_CONFIG, BN_CLICKED) => launch::edit(self.store.config_path()),
             (IDC_RELOAD, BN_CLICKED) => {
                 nudge_dock(true);
-                self.status("The dock read your dock's file again.");
+                self.status(tr!("The dock read your dock's file again."));
             }
             (IDC_CLEAR_CACHE, BN_CLICKED) => self.clear_icon_cache(),
             (IDC_OPEN_LOG, BN_CLICKED) => launch::edit(&self.home.dir.join("logs").join("dock.log")),
             (IDC_CHECK_UPDATES, BN_CLICKED) => {
                 let on = self.checked(IDC_CHECK_UPDATES);
-                self.change("Check for a new version once a day", None, false, |doc| edit::set_dock(doc, "check_updates", on));
+                let not_saved = |e: String| tr!("Check for a new version once a day wasn't saved. {error}", error = e);
+                self.change(tr!("Check for a new version once a day: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "check_updates", on));
             }
             (IDC_CHECK_NOW, BN_CLICKED) => self.start_update_work(false),
             (IDC_UPDATE_NOW, BN_CLICKED) => self.start_update_work(true),
@@ -2063,12 +2227,19 @@ impl Settings {
         Some(None)
     }
 
-    /// Saves one change to dock.toml, tells the dock, and says how it went. `renamed`: the
-    /// item's label after this change, if it changes it (so the window keeps following it).
-    /// `show`: the dock comes out to show it (not for things you can't see, like timings).
-    /// `what` is a setting ("Icon size": "Icon size: saved.") or, ending in a full stop, what
-    /// was done ("Moved Chrome.", shown as it is).
-    fn change(&mut self, what: &str, renamed: Option<String>, show: bool, edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>) -> bool {
+    /// Saves one change to dock.toml, tells the dock, and says how it went: `saved` once it's
+    /// saved ("Icon size: saved.", "Moved Chrome."), or what `not_saved` makes of why it wasn't.
+    /// `renamed`: the item's label after this change, if it changes it (so the window keeps
+    /// following it). `show`: the dock comes out to show it (not for things you can't see, like
+    /// timings).
+    fn change(
+        &mut self,
+        saved: &str,
+        not_saved: impl FnOnce(String) -> String,
+        renamed: Option<String>,
+        show: bool,
+        edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+    ) -> bool {
         let result = self.store.change(edit);
         if result.is_ok() && renamed.is_some() {
             self.following = renamed;
@@ -2077,17 +2248,17 @@ impl Settings {
         match result {
             Ok(_) => {
                 nudge_dock(show);
-                self.status(&if what.ends_with('.') { what.to_string() } else { format!("{what}: saved.") });
+                self.status(saved);
                 true
             }
             Err(e) => {
-                self.status(&if what.ends_with('.') { e } else { format!("{what} wasn't saved. {e}") });
+                self.status(&not_saved(e));
                 false
             }
         }
     }
 
-    fn set_field(&mut self, spot: Spot, expect: &str, key: &str, value: &str, what: &str) {
+    fn set_field(&mut self, spot: Spot, expect: &str, key: &str, value: &str) {
         let Some(item) = self.at(spot) else { return };
         let current = match key {
             "name" => item.name.as_str(),
@@ -2107,7 +2278,7 @@ impl Settings {
             edit::label_of(&renamed)
         });
         let show = key != "run"; // a name, target or icon: worth a look
-        self.change(what, renamed, show, |doc| edit::set_text(doc, spot, expect, key, value));
+        self.change(property_saved(key), |e| property_not_saved(key, e), renamed, show, |doc| edit::set_text(doc, spot, expect, key, value));
     }
 
     fn remove_selected(&mut self) {
@@ -2121,15 +2292,15 @@ impl Settings {
                 let _ = self.removed.add(&table, spot.child.unwrap_or(spot.index), group.as_deref());
                 nudge_dock(true);
                 self.select(spot);
-                self.status(&format!("Removed {expect}. To get it back: Revert, or Recently removed > Put back."));
+                self.status(&tr!("Removed {name}. To get it back: Revert, or Recently removed > Put back.", name = expect));
             }
-            Err(e) => self.status(&format!("{expect} wasn't removed: {e}")),
+            Err(e) => self.status(&tr!("{name} wasn't removed: {error}", name = expect, error = e)),
         }
     }
 
     /// Moves the item at `from` to the gap `to` in the same list (in front of what's there now).
     fn move_to(&mut self, from: Spot, to: Spot, expect: &str) {
-        if self.change(&format!("Moved {expect}."), None, true, |doc| edit::move_item(doc, from, to, expect)) {
+        if self.change(&tr!("Moved {name}.", name = expect), |e| e, None, true, |doc| edit::move_item(doc, from, to, expect)) {
             let (old, new) = (from.child.unwrap_or(from.index), to.child.unwrap_or(to.index));
             let landed = if new > old { new - 1 } else { new };
             self.select(Spot { index: if from.child.is_some() { from.index } else { landed }, child: from.child.map(|_| landed) });
@@ -2137,11 +2308,20 @@ impl Settings {
     }
 
     fn add(&mut self, gap: Spot, new: &[ItemConfig]) {
-        let what = match new {
-            [one] => format!("Added {}", edit::label_of(one)),
-            _ => format!("Added {} items", new.len()),
+        // One item by its name; several by how many.
+        let one = match new {
+            [one] => Some(edit::shown_label_of(one)),
+            _ => None,
         };
-        let added = self.change(&what, None, true, |doc| {
+        let saved = match &one {
+            Some(name) => tr!("Added {name}: saved.", name = name),
+            None => trn!("Added {n} item: saved.", "Added {n} items: saved.", new.len()),
+        };
+        let not_saved = |e: String| match &one {
+            Some(name) => tr!("{name} wasn't added. {error}", name = name, error = e),
+            None => trn!("{n} item wasn't added. {error}", "{n} items weren't added. {error}", new.len(), error = e),
+        };
+        let added = self.change(&saved, not_saved, None, true, |doc| {
             for (k, item) in new.iter().enumerate() {
                 let spot = match gap.child {
                     Some(child) => Spot::in_group(gap.index, child + k),
@@ -2158,16 +2338,16 @@ impl Settings {
 
     /// Group…: what can be done with the selected item and groups.
     fn group_menu(&self, spot: Spot, item: &ItemConfig) -> Vec<(usize, String)> {
-        let label = edit::label_of(item);
+        let label = edit::shown_label_of(item);
         let mut entries = Vec::new();
-        let groups: Vec<(usize, String)> = self.items.iter().enumerate().filter(|(_, it)| it.kind == Kind::Group).map(|(i, it)| (i, edit::label_of(it))).collect();
+        let groups: Vec<(usize, String)> = self.items.iter().enumerate().filter(|(_, it)| it.kind == Kind::Group).map(|(i, it)| (i, edit::shown_label_of(it))).collect();
         match (item.kind, spot.child) {
-            (Kind::Group, None) => entries.push((GROUP_UNGROUP, format!("Ungroup {label}"))),
+            (Kind::Group, None) => entries.push((GROUP_UNGROUP, tr!("Ungroup {name}", name = label))),
             (_, Some(_)) => {
                 let group = self.items.get(spot.index).map(edit::label_of).unwrap_or_default();
-                entries.push((GROUP_TAKE_OUT, format!("Take {label} out of {group}")));
+                entries.push((GROUP_TAKE_OUT, tr!("Take {name} out of {group}", name = label, group = group)));
             }
-            (_, None) => entries.push((GROUP_NEW, format!("New group with {label}"))),
+            (_, None) => entries.push((GROUP_NEW, tr!("New group with {name}", name = label))),
         }
         if item.kind != Kind::Group {
             let others: Vec<&(usize, String)> = groups.iter().filter(|(g, _)| spot.child.is_none() || *g != spot.index).collect();
@@ -2175,7 +2355,7 @@ impl Settings {
                 entries.push((0, String::new()));
             }
             for (g, name) in others {
-                entries.push((GROUP_MOVE + g, format!("Move to {name}")));
+                entries.push((GROUP_MOVE + g, tr!("Move to {group}", group = name)));
             }
         }
         entries
@@ -2186,22 +2366,25 @@ impl Settings {
         let Some(expect) = self.label(spot) else { return };
         match choice {
             GROUP_NEW => {
-                if self.change(&format!("New group with {expect}."), Some(NEW_GROUP_NAME.into()), true, |doc| edit::make_group(doc, spot.index, &expect, NEW_GROUP_NAME)) {
+                let done = tr!("New group with {name}.", name = expect);
+                if self.change(&done, |e| e, Some(NEW_GROUP_NAME.into()), true, |doc| edit::make_group(doc, spot.index, &expect, NEW_GROUP_NAME)) {
                     self.select(Spot::dock(spot.index));
-                    self.status(&format!("New group with {expect}. Type its name in Name."));
+                    self.status(&tr!("New group with {name}. Type its name in Name.", name = expect));
                 }
             }
             GROUP_UNGROUP => {
-                self.change(&format!("Ungrouped {expect}."), None, true, |doc| edit::ungroup(doc, spot.index, &expect).map(|_| ()));
+                self.change(&tr!("Ungrouped {name}.", name = expect), |e| e, None, true, |doc| edit::ungroup(doc, spot.index, &expect).map(|_| ()));
             }
             GROUP_TAKE_OUT => {
-                self.change(&format!("Took {expect} out of the group."), None, true, |doc| edit::move_item(doc, spot, Spot::dock(spot.index + 1), &expect));
+                let done = tr!("Took {name} out of the group.", name = expect);
+                self.change(&done, |e| e, None, true, |doc| edit::move_item(doc, spot, Spot::dock(spot.index + 1), &expect));
             }
             _ if choice >= GROUP_MOVE => {
                 let group = choice - GROUP_MOVE;
                 let name = self.items.get(group).map(edit::label_of).unwrap_or_default();
                 let end = self.items.get(group).map_or(0, |g| g.items.len());
-                self.change(&format!("Moved {expect} to {name}."), None, true, |doc| edit::move_item(doc, spot, Spot::in_group(group, end), &expect));
+                let done = tr!("Moved {name} to {group}.", name = expect, group = name);
+                self.change(&done, |e| e, None, true, |doc| edit::move_item(doc, spot, Spot::in_group(group, end), &expect));
             }
             _ => {}
         }
@@ -2219,7 +2402,7 @@ impl Settings {
         let rows: Vec<Vec<String>> = self
             .removed_list
             .iter()
-            .map(|entry| vec![entry.label.clone(), entry.removed_at.get(..16).unwrap_or(&entry.removed_at).to_string(), entry.was_in.clone().unwrap_or_else(|| "Dock".into())])
+            .map(|entry| vec![entry.label.clone(), entry.removed_at.get(..16).unwrap_or(&entry.removed_at).to_string(), entry.was_in.clone().unwrap_or_else(|| tr!("Dock").into())])
             .collect();
         fill_rows(list, &rows);
         let page = self.pages[SECTION_REMOVED];
@@ -2234,7 +2417,7 @@ impl Settings {
         let row = self.removed_list_control().and_then(selected_row).unwrap_or(0);
         let entry = self.removed_list.get(row).cloned();
         if entry.is_none() {
-            self.status("Nothing to put back.");
+            self.status(tr!("Nothing to put back."));
         }
         entry
     }
@@ -2251,11 +2434,11 @@ impl Settings {
         match result {
             Ok(_) => {
                 nudge_dock(true);
-                self.status(&format!("Put back {}.", entry.label));
+                self.status(&tr!("Put back {name}.", name = entry.label));
             }
             Err(e) => {
                 let _ = self.removed.restore(&entry); // leave it in the list
-                self.status(&format!("{} wasn't put back: {e}", entry.label));
+                self.status(&tr!("{name} wasn't put back: {error}", name = entry.label, error = e));
             }
         }
         self.reload_model();
@@ -2265,19 +2448,19 @@ impl Settings {
     fn forget_removed(&mut self) {
         let row = self.removed_list_control().and_then(selected_row);
         let Some(chosen) = row.and_then(|row| self.removed_list.get(row)).cloned() else {
-            self.status("Pick one in the list first.");
+            self.status(tr!("Pick one in the list first."));
             return;
         };
         if self.removed.take(&chosen.removed_at).is_some() {
-            self.status(&format!("Forgot {}.", chosen.label));
+            self.status(&tr!("Forgot {name}.", name = chosen.label));
         }
         self.fill_removed();
     }
 
     fn clear_removed(&mut self) {
         match self.removed.clear() {
-            Ok(()) => self.status("Recently removed is empty."),
-            Err(e) => self.status(&format!("Couldn't clear the list: {e}")),
+            Ok(()) => self.status(tr!("Recently removed is empty.")),
+            Err(e) => self.status(&tr!("Couldn't clear the list: {error}", error = e)),
         }
         self.fill_removed();
     }
@@ -2292,9 +2475,9 @@ impl Settings {
             .iter()
             .map(|backup| {
                 let kind = match backup.kind {
-                    BackupKind::Recent => "Before a change".to_string(),
-                    BackupKind::Daily => "Daily".to_string(),
-                    BackupKind::Pinned if backup.label.is_empty() => "Snapshot".to_string(),
+                    BackupKind::Recent => tr!("Before a change").to_string(),
+                    BackupKind::Daily => tr!("Daily").to_string(),
+                    BackupKind::Pinned if backup.label.is_empty() => tr!("Snapshot").to_string(),
                     BackupKind::Pinned => kept_copy_kind(&backup.label).to_string(),
                 };
                 let count = config::read_text(&backup.path).ok().and_then(|text| item_count(&text)).map_or("?".to_string(), |n| n.to_string());
@@ -2308,17 +2491,17 @@ impl Settings {
     fn restore_version(&mut self) {
         let list = self.pages.get(SECTION_VERSIONS).and_then(|&page| unsafe { GetDlgItem(Some(page), IDC_VERSIONS_LIST).ok() });
         let Some(backup) = list.and_then(selected_row).and_then(|row| self.versions.get(row)).cloned() else {
-            self.status("Pick a version in the list first.");
+            self.status(tr!("Pick a version in the list first."));
             return;
         };
         let text = match config::read_text(&backup.path) {
             Ok(text) if config::parse(&text).is_ok() => text,
             Ok(_) => {
-                self.status("That version can't be read as a dock; nothing changed.");
+                self.status(tr!("That version can't be read as a dock; nothing changed."));
                 return;
             }
             Err(e) => {
-                self.status(&format!("Couldn't read it: {e}"));
+                self.status(&tr!("Couldn't read it: {error}", error = e));
                 return;
             }
         };
@@ -2328,10 +2511,13 @@ impl Settings {
         match result {
             Ok(()) => {
                 nudge_dock(true);
-                let kept = if kept.is_some() { " Your dock as it was is kept in Versions." } else { "" };
-                self.status(&format!("Restored the version from {}.{kept}", backup.when));
+                self.status(&if kept.is_some() {
+                    tr!("Restored the version from {when}. Your dock as it was is kept in Versions.", when = backup.when)
+                } else {
+                    tr!("Restored the version from {when}.", when = backup.when)
+                });
             }
-            Err(e) => self.status(&format!("Couldn't restore it: {e}")),
+            Err(e) => self.status(&tr!("Couldn't restore it: {error}", error = e)),
         }
         self.fill_versions();
     }
@@ -2350,8 +2536,8 @@ impl Settings {
             .and_then(|text| edit::portable(&text, &folders))
             .and_then(|text| std::fs::write(path, text).map_err(|e| e.to_string()));
         match copy {
-            Ok(()) => self.status(&format!("Saved a copy of your dock: {path}")),
-            Err(e) => self.status(&format!("Couldn't save the copy: {e}")),
+            Ok(()) => self.status(&tr!("Saved a copy of your dock: {path}", path = path)),
+            Err(e) => self.status(&tr!("Couldn't save the copy: {error}", error = e)),
         }
     }
 
@@ -2359,12 +2545,14 @@ impl Settings {
         let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let text = match config::read_text(Path::new(path)) {
             Ok(text) => text,
-            Err(e) => return self.status(&format!("Couldn't read {name}: {e}")),
+            Err(e) => return self.status(&tr!("Couldn't read {name}: {error}", name = name, error = e)),
         };
         match config::parse(&text) {
-            Err(e) => self.status(&format!("{name} isn't a Desktop Dock file: {e}")),
-            Ok(parsed) if parsed.read_only => self.status(&format!("{name} is from a newer Desktop Dock; nothing changed.")),
-            Ok(_) => self.replace_dock(&text, "before-load", &format!("Loaded {name}")),
+            Err(e) => self.status(&tr!("{name} isn't a Desktop Dock file: {error}", name = name, error = e)),
+            Ok(parsed) if parsed.read_only => self.status(&tr!("{name} is from a newer Desktop Dock; nothing changed.", name = name)),
+            Ok(_) => self.replace_dock(&text, "before-load", |kept| {
+                if kept { tr!("Loaded {name}. Your dock as it was is kept in Versions.", name = name) } else { tr!("Loaded {name}.", name = name) }
+            }),
         }
     }
 
@@ -2375,18 +2563,40 @@ impl Settings {
         };
         let imported = import::convert(&rocketdock, |path| Path::new(path).exists(), icons::icon_count);
         // A short summary here; each note in full in the log.
-        let mut done = format!("Imported {} from RocketDock", plural(imported.items, "item", "items"));
         for note in &imported.report {
             crate::log_info!("RocketDock import: {note}");
         }
-        if !imported.report.is_empty() {
-            done.push_str(&format!(" ({}, in the log: Files > Open dock folder > logs)", plural(imported.report.len(), "note", "notes")));
-        }
-        self.replace_dock(&imported.text, "before-import", &done);
+        let (items, notes) = (imported.items, imported.report.len());
+        self.replace_dock(&imported.text, "before-import", |kept| {
+            // A text takes one count (here, the items'): the notes' count is a phrase of its own.
+            let notes_said = trn!("{n} note", "{n} notes", notes);
+            match (notes, kept) {
+                (0, false) => trn!("Imported {n} item from RocketDock.", "Imported {n} items from RocketDock.", items),
+                (0, true) => trn!(
+                    "Imported {n} item from RocketDock. Your dock as it was is kept in Versions.",
+                    "Imported {n} items from RocketDock. Your dock as it was is kept in Versions.",
+                    items
+                ),
+                (_, false) => trn!(
+                    "Imported {n} item from RocketDock ({notes}, in the log: Files > Open dock folder > logs).",
+                    "Imported {n} items from RocketDock ({notes}, in the log: Files > Open dock folder > logs).",
+                    items,
+                    notes = notes_said
+                ),
+                (_, true) => trn!(
+                    "Imported {n} item from RocketDock ({notes}, in the log: Files > Open dock folder > logs). Your dock as it was is kept in Versions.",
+                    "Imported {n} items from RocketDock ({notes}, in the log: Files > Open dock folder > logs). Your dock as it was is kept in Versions.",
+                    items,
+                    notes = notes_said
+                ),
+            }
+        });
     }
 
     /// Replaces your whole dock (a loaded copy, an import), keeping it as it was in Versions.
-    fn replace_dock(&mut self, text: &str, pin: &str, done: &str) {
+    /// `done` says what was done, given whether the dock as it was is kept (it's asked once the
+    /// new dock is read, so it's in that dock's language).
+    fn replace_dock(&mut self, text: &str, pin: &str, done: impl FnOnce(bool) -> String) {
         let kept = self.store.pin(pin);
         let result = self.store.replace(text);
         self.reload_model();
@@ -2394,17 +2604,16 @@ impl Settings {
         match result {
             Ok(()) => {
                 nudge_dock(true);
-                let kept = if kept.is_some() { " Your dock as it was is kept in Versions." } else { "" };
-                self.status(&format!("{done}.{kept}"));
+                self.status(&done(kept.is_some()));
             }
-            Err(e) => self.status(&format!("Nothing changed. {e}")),
+            Err(e) => self.status(&tr!("Nothing changed. {error}", error = e)),
         }
     }
 
     fn save_snapshot(&mut self) {
         match self.store.pin("snapshot") {
-            Some(_) => self.status("Saved a snapshot of your dock: it's kept in Versions."),
-            None => self.status("Couldn't save a snapshot."),
+            Some(_) => self.status(tr!("Saved a snapshot of your dock: it's kept in Versions.")),
+            None => self.status(tr!("Couldn't save a snapshot.")),
         }
         self.fill_versions();
     }
@@ -2416,11 +2625,14 @@ impl Settings {
         set_text(page, IDC_FOLDER, &self.home.dir.display().to_string());
         let (all, cache, backups, logs) =
             (folder_size(&self.home.dir), folder_size(&self.home.icon_cache()), folder_size(&self.home.backups()), folder_size(&self.home.logs()));
-        set_text(
-            page,
-            IDC_SIZES,
-            &format!("Uses {}: icons {}, backups {}, logs {}, and dock.toml itself.", megabytes(all), megabytes(cache), megabytes(backups), megabytes(logs)),
+        let sizes = tr!(
+            "Uses {all} MB: icons {icons} MB, backups {backups} MB, logs {logs} MB, and dock.toml itself.",
+            all = megabytes(all),
+            icons = megabytes(cache),
+            backups = megabytes(backups),
+            logs = megabytes(logs),
         );
+        set_text(page, IDC_SIZES, &sizes);
     }
 
     /// Deletes the made icons; the dock makes them again as it needs them.
@@ -2434,7 +2646,7 @@ impl Settings {
             }
         }
         nudge_dock(false);
-        self.status(&format!("Cleared {}; the dock remakes them as it needs them.", plural(gone, "icon", "icons")));
+        self.status(&trn!("Cleared {n} icon; the dock remakes them as it needs them.", "Cleared {n} icons; the dock remakes them as it needs them.", gone));
         self.fill_files();
     }
 
@@ -2451,7 +2663,7 @@ impl Settings {
     fn revert_file(&mut self) {
         let now = config::read_text(self.store.config_path()).unwrap_or_default();
         if now == self.opening {
-            self.status("Nothing to revert: your dock is as it was when this window opened.");
+            self.status(tr!("Nothing to revert: your dock is as it was when this window opened."));
             return;
         }
         // What's being undone stays in Versions, in case the revert wasn't wanted after all.
@@ -2461,9 +2673,9 @@ impl Settings {
         match result {
             Ok(()) => {
                 nudge_dock(true);
-                self.status("Reverted: your dock is back as it was when this window opened.");
+                self.status(tr!("Reverted: your dock is back as it was when this window opened."));
             }
-            Err(e) => self.status(&format!("Couldn't revert: {e}")),
+            Err(e) => self.status(&tr!("Couldn't revert: {error}", error = e)),
         }
     }
 
@@ -2473,12 +2685,12 @@ impl Settings {
         let (Some(spot), Some(was)) = (self.selected, self.opening_item.clone()) else { return };
         let Some(now) = self.at(spot).cloned() else { return };
         if same_properties(&was, &now) {
-            self.status("Nothing to revert.");
+            self.status(tr!("Nothing to revert."));
             return;
         }
         let expect = edit::label_of(&now);
         let renamed = (was.name != now.name).then(|| edit::label_of(&was));
-        self.change("Reverted.", renamed, true, |doc| {
+        self.change(tr!("Reverted."), |e| e, renamed, true, |doc| {
             for (key, before, after) in [
                 ("target", was.target.as_str(), now.target.as_str()),
                 ("args", &was.args, &now.args),
@@ -2506,7 +2718,7 @@ impl Settings {
         if modified(self.store.config_path()) == self.stamp {
             return;
         }
-        let typing = self.focused_field().and_then(|id| self.saved_value(id).map(|(_, _, saved)| (id, saved)));
+        let typing = self.focused_field().and_then(|id| self.saved_value(id).map(|(_, saved)| (id, saved)));
         if typing.is_some_and(|(id, saved)| text_of(self.page, id).trim() != saved.trim()) {
             return;
         }

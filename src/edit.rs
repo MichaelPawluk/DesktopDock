@@ -27,16 +27,13 @@ impl Spot {
     }
 }
 
-/// What an item is called in messages and checks: its name, or what kind of thing it is.
+/// What an item is called in checks (and the log): its name, or what kind of thing it is, in
+/// English, so a check still matches after the language changed. People are shown
+/// `shown_label`.
 pub fn label(table: &Table) -> String {
     match table.get("name").and_then(Item::as_str).filter(|name| !name.trim().is_empty()) {
         Some(name) => name.to_string(),
-        None => match table.get("kind").and_then(Item::as_str) {
-            Some("separator") => "separator".into(),
-            Some("recycle-bin") => "Recycle Bin".into(),
-            Some("group") => "group".into(),
-            _ => "item".into(),
-        },
+        None => unnamed(kind_in(table), false),
     }
 }
 
@@ -45,11 +42,47 @@ pub fn label_of(item: &ItemConfig) -> String {
     if !item.name.trim().is_empty() {
         return item.name.clone();
     }
-    match item.kind {
-        Kind::Separator => "separator".into(),
-        Kind::RecycleBin => "Recycle Bin".into(),
-        Kind::Group => "group".into(),
-        Kind::App => "item".into(),
+    unnamed(item.kind, false)
+}
+
+/// What an item is called where people see it: its name, or what kind of thing it is, in the
+/// language in use.
+pub fn shown_label(table: &Table) -> String {
+    match table.get("name").and_then(Item::as_str).filter(|name| !name.trim().is_empty()) {
+        Some(name) => name.to_string(),
+        None => unnamed(kind_in(table), true),
+    }
+}
+
+/// The same, for an item as the dock loaded it.
+pub fn shown_label_of(item: &ItemConfig) -> String {
+    if !item.name.trim().is_empty() {
+        return item.name.clone();
+    }
+    unnamed(item.kind, true)
+}
+
+fn kind_in(table: &Table) -> Kind {
+    match table.get("kind").and_then(Item::as_str) {
+        Some("separator") => Kind::Separator,
+        Some("recycle-bin") => Kind::RecycleBin,
+        Some("group") => Kind::Group,
+        _ => Kind::App,
+    }
+}
+
+/// An item without a name, by its kind: in English, or as shown (the Recycle Bin as Windows
+/// names it).
+fn unnamed(kind: Kind, shown: bool) -> String {
+    match (kind, shown) {
+        (Kind::Separator, false) => "separator".into(),
+        (Kind::RecycleBin, false) => "Recycle Bin".into(),
+        (Kind::Group, false) => "group".into(),
+        (Kind::App, false) => "item".into(),
+        (Kind::Separator, true) => tr!("separator").into(),
+        (Kind::RecycleBin, true) => crate::places::recycle_bin_name(),
+        (Kind::Group, true) => tr!("group").into(),
+        (Kind::App, true) => tr!("item").into(),
     }
 }
 
@@ -57,24 +90,33 @@ pub fn label_of(item: &ItemConfig) -> String {
 pub fn remove(doc: &mut DocumentMut, spot: Spot, expect: &str) -> Result<Table, String> {
     let list = list_mut(doc, spot, false)?;
     let at = spot.child.unwrap_or(spot.index);
-    let found = list.get(at).map(label).ok_or_else(|| "That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.".to_string())?;
-    if found != expect {
-        return Err(format!("Your dock changed in the meantime ({expect} has moved; {found} is there now), so nothing was saved. Try again."));
+    let found = list.get(at).ok_or_else(|| tr!("That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.").to_string())?;
+    if label(found) != expect {
+        return Err(changed(expect, found));
     }
     let table = list.remove(at);
     renumber(doc);
     Ok(table)
 }
 
+/// Says that another item is where `expect` was.
+fn changed(expect: &str, found: &Table) -> String {
+    tr!(
+        "Your dock changed in the meantime ({expect} has moved; {found} is there now), so nothing was saved. Try again.",
+        expect = expect,
+        found = shown_label(found)
+    )
+}
+
 /// Puts `table` into the gap at `spot`.
 pub fn insert(doc: &mut DocumentMut, spot: Spot, table: Table) -> Result<(), String> {
     if spot.child.is_some() && is_group(&table) {
-        return Err("A group can't go inside another group.".into());
+        return Err(tr!("A group can't go inside another group.").into());
     }
     let list = list_mut(doc, spot, true)?;
     let at = spot.child.unwrap_or(spot.index);
     if at > list.len() {
-        return Err("Your dock changed in the meantime, so nothing was saved. Try again.".into());
+        return Err(tr!("Your dock changed in the meantime, so nothing was saved. Try again.").into());
     }
     list.insert(at, table);
     renumber(doc);
@@ -86,7 +128,7 @@ pub fn insert(doc: &mut DocumentMut, spot: Spot, table: Table) -> Result<(), Str
 /// changes nothing. All or nothing: if any step fails, the file is left exactly as it was.
 pub fn move_item(doc: &mut DocumentMut, from: Spot, to: Spot, expect: &str) -> Result<(), String> {
     if to.child.is_some() && from.child.is_none() && from.index == to.index {
-        return Err("An item can't go inside itself.".into());
+        return Err(tr!("An item can't go inside itself.").into());
     }
     let mut trial = doc.clone();
     move_steps(&mut trial, from, to, expect)?;
@@ -111,10 +153,9 @@ fn move_steps(doc: &mut DocumentMut, from: Spot, mut to: Spot, expect: &str) -> 
 pub fn set_text(doc: &mut DocumentMut, spot: Spot, expect: &str, key: &str, value: &str) -> Result<(), String> {
     let list = list_mut(doc, spot, false)?;
     let at = spot.child.unwrap_or(spot.index);
-    let table = list.get_mut(at).ok_or_else(|| "That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.".to_string())?;
-    let found = label(table);
-    if found != expect {
-        return Err(format!("Your dock changed in the meantime ({expect} has moved; {found} is there now), so nothing was saved. Try again."));
+    let table = list.get_mut(at).ok_or_else(|| tr!("That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.").to_string())?;
+    if label(table) != expect {
+        return Err(changed(expect, table));
     }
     if value.is_empty() {
         table.remove(key);
@@ -128,10 +169,9 @@ pub fn set_text(doc: &mut DocumentMut, spot: Spot, expect: &str, key: &str, valu
 pub fn set_flag(doc: &mut DocumentMut, spot: Spot, expect: &str, key: &str, on: bool) -> Result<(), String> {
     let list = list_mut(doc, spot, false)?;
     let at = spot.child.unwrap_or(spot.index);
-    let table = list.get_mut(at).ok_or_else(|| "That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.".to_string())?;
-    let found = label(table);
-    if found != expect {
-        return Err(format!("Your dock changed in the meantime ({expect} has moved; {found} is there now), so nothing was saved. Try again."));
+    let table = list.get_mut(at).ok_or_else(|| tr!("That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.").to_string())?;
+    if label(table) != expect {
+        return Err(changed(expect, table));
     }
     if on {
         table[key] = toml_edit::value(true);
@@ -147,7 +187,7 @@ pub fn make_group(doc: &mut DocumentMut, index: usize, expect: &str, name: &str)
     let mut trial = doc.clone();
     let mut table = remove(&mut trial, Spot::dock(index), expect)?;
     if is_group(&table) {
-        return Err(format!("{expect} is a group already."));
+        return Err(tr!("{name} is a group already.", name = shown_label(&table)));
     }
     table.decor_mut().set_prefix("
 ");
@@ -169,7 +209,7 @@ pub fn ungroup(doc: &mut DocumentMut, index: usize, expect: &str) -> Result<usiz
     let mut trial = doc.clone();
     let group = remove(&mut trial, Spot::dock(index), expect)?;
     if !is_group(&group) {
-        return Err(format!("{expect} isn't a group."));
+        return Err(tr!("{name} isn't a group.", name = shown_label(&group)));
     }
     let children: Vec<Table> = group.get("items").and_then(Item::as_array_of_tables).map(|list| list.iter().cloned().collect()).unwrap_or_default();
     let count = children.len();
@@ -182,7 +222,7 @@ pub fn ungroup(doc: &mut DocumentMut, index: usize, expect: &str) -> Result<usiz
 
 /// Sets one of the dock's settings (`[dock] key = value`), keeping any comment after it.
 pub fn set_dock(doc: &mut DocumentMut, key: &str, value: impl Into<toml_edit::Value>) -> Result<(), String> {
-    let dock = doc.entry("dock").or_insert(toml_edit::table()).as_table_mut().ok_or("[dock] in dock.toml isn't a section")?;
+    let dock = doc.entry("dock").or_insert(toml_edit::table()).as_table_mut().ok_or(tr!("[dock] in dock.toml isn't a section"))?;
     let mut value = value.into();
     match dock.get_mut(key).and_then(Item::as_value_mut) {
         Some(existing) => {
@@ -202,10 +242,9 @@ pub fn set_dock(doc: &mut DocumentMut, key: &str, value: impl Into<toml_edit::Va
 pub fn replace_program(doc: &mut DocumentMut, spot: Spot, expect: &str, new: &ItemConfig) -> Result<(), String> {
     let list = list_mut(doc, spot, false)?;
     let at = spot.child.unwrap_or(spot.index);
-    let table = list.get_mut(at).ok_or_else(|| "That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.".to_string())?;
-    let found = label(table);
-    if found != expect {
-        return Err(format!("Your dock changed in the meantime ({expect} has moved; {found} is there now), so nothing was saved. Try again."));
+    let table = list.get_mut(at).ok_or_else(|| tr!("That item isn't there any more: your dock changed in the meantime, so nothing was saved. Try again.").to_string())?;
+    if label(table) != expect {
+        return Err(changed(expect, table));
     }
     for (key, text) in [("target", &new.target), ("args", &new.args), ("start_in", &new.start_in)] {
         if text.is_empty() {
@@ -323,18 +362,18 @@ fn list_mut(doc: &mut DocumentMut, spot: Spot, create: bool) -> Result<&mut Arra
     if create && doc.get("item").is_none() {
         doc.insert("item", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    let items = doc.get_mut("item").and_then(Item::as_array_of_tables_mut).ok_or("dock.toml has no items")?;
+    let items = doc.get_mut("item").and_then(Item::as_array_of_tables_mut).ok_or(tr!("dock.toml has no items"))?;
     if spot.child.is_none() {
         return Ok(items);
     }
-    let group = items.get_mut(spot.index).ok_or_else(|| "That group isn't there any more: your dock changed in the meantime. Try again.".to_string())?;
+    let group = items.get_mut(spot.index).ok_or_else(|| tr!("That group isn't there any more: your dock changed in the meantime. Try again.").to_string())?;
     if !is_group(group) {
-        return Err(format!("{} isn't a group.", label(group)));
+        return Err(tr!("{name} isn't a group.", name = shown_label(group)));
     }
     if create && group.get("items").is_none() {
         group.insert("items", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    group.get_mut("items").and_then(Item::as_array_of_tables_mut).ok_or_else(|| "that group is empty".to_string())
+    group.get_mut("items").and_then(Item::as_array_of_tables_mut).ok_or_else(|| tr!("that group is empty").to_string())
 }
 
 /// toml_edit writes tables out in the order they were read, so after a change number them

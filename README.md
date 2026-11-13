@@ -16,6 +16,7 @@ A lightweight dock for Windows 11. It stays hidden at the top of your screen (or
 - **Finds moved programs:** when an update moves a program, for example Photoshop 2026 being replaced by Photoshop 2027, the dock finds the new version on its own.
 - **Easy switch from RocketDock:** import your existing RocketDock setup, icons and all.
 - **Your look:** a light or dark panel, clear glass, frosted, or a floating capsule that follows Windows' light or dark mode, with an optional hover glow in your accent colour. Names can show for the icon you point at, for every icon, or not at all.
+- **In your language:** English, Deutsch, Français, Español, Português (Brasil), Русский, 中文(简体) and 日本語. It follows Windows' display language, or choose one in Dock settings > Look > Language. The translations are new: if something reads oddly, corrections are welcome ([how](lang/README.md)).
 - **Lightweight:** uses about 9 MB of memory and collects no data. It goes online only to check for a new version when you ask (Dock settings > About), or once a day if you tick that box, and then it only asks GitHub which version is the newest.
 
 <p align="center">

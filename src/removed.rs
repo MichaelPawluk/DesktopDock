@@ -26,6 +26,7 @@ const WAS_IN: &str = "was_in";
 pub struct Entry {
     /// When it was removed, to the millisecond; also its id.
     pub removed_at: String,
+    /// What it's called, as shown (its name, or what kind of thing it is in the language in use).
     pub label: String,
     /// Where it was: position on the dock or in its group (counted from 0), and the group.
     pub was_at: usize,
@@ -136,7 +137,7 @@ impl Removed {
     fn save(&self, mut doc: DocumentMut) -> Result<(), String> {
         edit::renumber(&mut doc);
         let body = doc.to_string();
-        store::atomic_write(&self.path, &format!("{HEADER}{body}")).map_err(|e| format!("Couldn't save Recently removed: {e}."))
+        store::atomic_write(&self.path, &format!("{HEADER}{body}")).map_err(|e| tr!("Couldn't save Recently removed: {error}.", error = e))
     }
 }
 
@@ -149,7 +150,7 @@ fn entry_from(table: &Table) -> Option<Entry> {
         clean.remove(key);
     }
     clean.decor_mut().set_prefix("\n");
-    Some(Entry { removed_at, label: edit::label(&clean), was_at, was_in, table: clean })
+    Some(Entry { removed_at, label: edit::shown_label(&clean), was_at, was_in, table: clean })
 }
 
 fn now() -> String {

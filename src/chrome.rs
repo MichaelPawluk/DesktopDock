@@ -646,16 +646,16 @@ unsafe extern "system" fn shortcut_box(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
 }
 
 /// What the shortcut box holds, as Windows writes it: "Ctrl + Shift + D", "Ctrl + " while it's
-/// being pressed, "None" when empty. Key names are Windows' own, in your language.
+/// being pressed, "None" when empty. The other keys' names are Windows' own, in your language.
 fn shortcut_words(value: u32) -> String {
     use crate::hotkey::{HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_SHIFT};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyNameTextW, MAPVK_VK_TO_VSC, MapVirtualKeyW};
     let (key, flags) = (value & 0xFF, (value >> 8) & 0xFF);
     if key == 0 && flags == 0 {
-        return "None".into();
+        return tr!("None").into();
     }
     let mut words = String::new();
-    for (flag, name) in [(HOTKEYF_CONTROL, "Ctrl"), (HOTKEYF_SHIFT, "Shift"), (HOTKEYF_ALT, "Alt")] {
+    for (flag, name) in [(HOTKEYF_CONTROL, tr!("Ctrl")), (HOTKEYF_SHIFT, tr!("Shift")), (HOTKEYF_ALT, tr!("Alt"))] {
         if flags & flag != 0 {
             words.push_str(name);
             words.push_str(" + ");
@@ -668,7 +668,7 @@ fn shortcut_words(value: u32) -> String {
         let scan = unsafe { MapVirtualKeyW(key, MAPVK_VK_TO_VSC) } as i32;
         let mut name = [0u16; 64];
         let len = unsafe { GetKeyNameTextW((scan << 16) | if extended { 1 << 24 } else { 0 }, &mut name) }.max(0) as usize;
-        words.push_str(&if len > 0 { String::from_utf16_lossy(&name[..len]) } else { format!("Key {key}") });
+        words.push_str(&if len > 0 { String::from_utf16_lossy(&name[..len]) } else { tr!("Key {number}", number = key) });
     }
     words
 }

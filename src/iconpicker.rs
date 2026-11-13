@@ -115,11 +115,6 @@ thread_local! {
     static PICKER: RefCell<Option<Picker>> = const { RefCell::new(None) };
 }
 
-/// "1 icon", "24 icons".
-fn icons_count(n: usize) -> String {
-    if n == 1 { "1 icon".to_string() } else { format!("{n} icons") }
-}
-
 fn with_picker<R>(f: impl FnOnce(&mut Picker) -> R) -> Option<R> {
     PICKER.with(|cell| cell.try_borrow_mut().ok().and_then(|mut p| p.as_mut().map(f)))
 }
@@ -179,6 +174,7 @@ unsafe extern "system" fn picker_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     }
     match msg {
         WM_INITDIALOG => {
+            crate::text::translate_dialog(hwnd);
             with_picker(|p| p.start(hwnd));
             if let Ok(list) = unsafe { GetDlgItem(Some(hwnd), IDC_ICONS) } {
                 unsafe {
@@ -273,10 +269,10 @@ fn images_in(folder: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// The icons inside a program or DLL.
-fn icons_inside(file: &str, prefix: &str) -> Vec<Choice> {
+/// The icons inside a program or DLL, each called what `label` makes of its number (from 1).
+fn icons_inside(file: &str, label: impl Fn(u32) -> String) -> Vec<Choice> {
     (0..icons::icon_count(file))
-        .map(|k| Choice { label: format!("{prefix}{}", k + 1), icon: format!("{file},{k}"), sources: vec![IconSource::Resource(file.to_string(), k as i32)] })
+        .map(|k| Choice { label: label(k + 1), icon: format!("{file},{k}"), sources: vec![IconSource::Resource(file.to_string(), k as i32)] })
         .collect()
 }
 
@@ -294,9 +290,9 @@ impl Picker {
             if let Ok(combo) = GetDlgItem(Some(dialog), IDC_SHELF) {
                 for shelf in &self.shelves {
                     let name = match shelf {
-                        Shelf::Yours => "Your icons".to_string(),
-                        Shelf::Program => "The program's own icons".into(),
-                        Shelf::Windows => "Windows icons".into(),
+                        Shelf::Yours => tr!("Your icons"),
+                        Shelf::Program => tr!("The program's own icons"),
+                        Shelf::Windows => tr!("Windows icons"),
                     };
                     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
                     SendMessageW(combo, CB_ADDSTRING, None, Some(LPARAM(wide.as_ptr() as isize)));
@@ -349,12 +345,12 @@ impl Picker {
                     })
                     .collect()
             }
-            Shelf::Program => self.program.as_deref().map(|program| icons_inside(program, "")).unwrap_or_default(),
+            Shelf::Program => self.program.as_deref().map(|program| icons_inside(program, |number| number.to_string())).unwrap_or_default(),
             Shelf::Windows => {
                 let system = std::env::var("WINDIR").map(|w| PathBuf::from(w).join("System32")).unwrap_or_else(|_| PathBuf::from("C:\\Windows\\System32"));
                 // Today's set, then the older one (named so a search can tell them apart).
-                let mut all = icons_inside(&system.join("imageres.dll").display().to_string(), "Windows ");
-                all.extend(icons_inside(&system.join("shell32.dll").display().to_string(), "Windows classic "));
+                let mut all = icons_inside(&system.join("imageres.dll").display().to_string(), |number| tr!("Windows {number}", number = number));
+                all.extend(icons_inside(&system.join("shell32.dll").display().to_string(), |number| tr!("Windows classic {number}", number = number)));
                 all
             }
         };
@@ -364,10 +360,10 @@ impl Picker {
             let _ = ImageList_Remove(self.images, -1); // all of them
         }
         let info = match (shelf, self.choices.len(), &self.folder) {
-            (Shelf::Yours, 0, Some(_)) => r"No images in Pictures\Icons yet: put .png or .ico files there, or click Browse.".into(),
-            (Shelf::Yours, _, None) => r"Put .png or .ico files in Pictures\Icons to see them here, or click Browse.".into(),
-            (Shelf::Yours, n, Some(_)) => format!(r"{} in Pictures\Icons", icons_count(n)),
-            (_, n, _) => icons_count(n),
+            (Shelf::Yours, 0, Some(_)) => tr!("No images in Pictures\\Icons yet: put .png or .ico files there, or click Browse.").into(),
+            (Shelf::Yours, _, None) => tr!("Put .png or .ico files in Pictures\\Icons to see them here, or click Browse.").into(),
+            (Shelf::Yours, n, Some(_)) => trn!("{n} icon in Pictures\\Icons", "{n} icons in Pictures\\Icons", n),
+            (_, n, _) => trn!("{n} icon", "{n} icons", n),
         };
         set_info(self.dialog, &info);
         self.refill();
@@ -449,7 +445,7 @@ impl Picker {
         (self.apply)(&icon);
         self.applied = true;
         self.current = icon;
-        set_info(self.dialog, &format!("{label}: showing on the dock. Click Use this icon to keep it, or Cancel to go back."));
+        set_info(self.dialog, &tr!("{name}: showing on the dock. Click Use this icon to keep it, or Cancel to go back.", name = label));
     }
 
     fn receive(&mut self) {

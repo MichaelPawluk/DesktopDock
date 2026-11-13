@@ -107,8 +107,9 @@ impl Liveness {
     }
 }
 
-/// Runs the dock as a child and restarts it after crashes. `args` are passed through.
-pub fn run(args: &[String]) -> ! {
+/// Runs the dock as a child and restarts it after crashes. `args` are passed through; `home` is
+/// the dock folder (its dock.toml says which language to speak).
+pub fn run(args: &[String], home: &std::path::Path) -> ! {
     let Ok(exe) = std::env::current_exe() else { std::process::exit(1) };
     let mut policy = Policy::default();
     let mut safe_mode = false;
@@ -135,10 +136,9 @@ pub fn run(args: &[String]) -> ! {
             }
             Decision::GiveUp => {
                 log_error!("dock crashed {} times in 10 minutes; stopped restarting it", MAX_CRASHES + 1);
+                crate::use_language_of(home); // (it may have been changed since the watchdog started)
                 system::notice_blocking(
-                    "Desktop Dock crashed several times in a few minutes, so it won't restart by itself.\n\n\
-                     The details are in the dock folder's logs\\dock.log. Start it again from the Start \
-                     menu when you're ready."
+                    tr!("Desktop Dock crashed several times in a few minutes, so it won't restart by itself.\n\nThe details are in the dock folder's logs\\dock.log. Start it again from the Start menu when you're ready.")
                         .into(),
                 );
                 std::process::exit(1);
@@ -154,10 +154,9 @@ pub fn run(args: &[String]) -> ! {
                 }
                 if safe && !safe_mode {
                     log_warn!("two quick crashes in a row: restarting in safe mode");
+                    crate::use_language_of(home);
                     system::notice(
-                        "Desktop Dock crashed twice while starting, so it's running in safe mode: icons come \
-                         only from its cache, and repairs and Recycle Bin checks are off.\n\nTo leave safe \
-                         mode, right-click it > Exit Desktop Dock, then start it again from the Start menu."
+                        tr!("Desktop Dock crashed twice while starting, so it's running in safe mode: icons come only from its cache, and repairs and Recycle Bin checks are off.\n\nTo leave safe mode, right-click it > Exit Desktop Dock, then start it again from the Start menu.")
                             .into(),
                     );
                 }

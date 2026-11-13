@@ -32,22 +32,24 @@ pub fn starts_with_windows() -> bool {
 /// away). Either way an entry of an earlier version in Windows' startup list goes.
 pub fn set_starts_with_windows(on: bool) -> Result<(), String> {
     let exe = if on { Some(system::startup_exe()?) } else { None };
-    let name = task_name().map_err(|_| "Your Windows user couldn't be found.".to_string())?;
-    let folder = folder().map_err(|e| format!("Task Scheduler couldn't be reached ({}).", e.message()))?;
+    let name = task_name().map_err(|_| tr!("Your Windows user couldn't be found.").to_string())?;
+    let folder = folder().map_err(|e| tr!("Task Scheduler couldn't be reached ({why}).", why = e.message()))?;
     unsafe {
         match &exe {
             Some(exe) => {
-                let xml = task_xml(&exe.to_string_lossy(), &user_sid().map_err(|_| "Your Windows user couldn't be found.".to_string())?);
+                let sid = user_sid().map_err(|_| tr!("Your Windows user couldn't be found.").to_string())?;
+                // (Task Scheduler shows the task's description as it's written: in the language in use now.)
+                let xml = task_xml(&exe.to_string_lossy(), &sid, tr!("Starts Desktop Dock when you sign in (its Start with Windows setting)."));
                 let none = VARIANT::default();
                 folder
                     .RegisterTask(&BSTR::from(&name), &BSTR::from(xml), TASK_CREATE_OR_UPDATE.0, &none, &none, TASK_LOGON_INTERACTIVE_TOKEN, &none)
-                    .map_err(|e| format!("Windows didn't allow the sign-in task ({}).", e.message()))?;
+                    .map_err(|e| tr!("Windows didn't allow the sign-in task ({why}).", why = e.message()))?;
             }
             None => {
                 if let Err(e) = folder.DeleteTask(&BSTR::from(&name), 0) {
                     // Not there is fine: it's off either way.
                     if e.code().0 as u32 != 0x8007_0002 {
-                        return Err(format!("Windows didn't allow the change ({}).", e.message()));
+                        return Err(tr!("Windows didn't allow the change ({why}).", why = e.message()));
                     }
                 }
             }
@@ -107,16 +109,17 @@ fn user_sid() -> windows::core::Result<String> {
 
 /// The task: at this user's sign-in, start the dock with `--startup`, as this user, without
 /// administrator rights. Not stopped after 3 days (Task Scheduler's own default), nor on
-/// battery, and at normal priority (a task's default is below normal).
-pub fn task_xml(exe: &str, sid: &str) -> String {
-    let (exe, sid) = (escape(exe), escape(sid));
+/// battery, and at normal priority (a task's default is below normal). `description` is what
+/// Task Scheduler says the task is for.
+pub fn task_xml(exe: &str, sid: &str, description: &str) -> String {
+    let (exe, sid, description) = (escape(exe), escape(sid), escape(description));
     let flag = system::STARTUP_FLAG;
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>Desktop Dock</Author>
-    <Description>Starts Desktop Dock when you sign in (its Start with Windows setting).</Description>
+    <Description>{description}</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -166,7 +169,8 @@ mod tests {
 
     #[test]
     fn the_task_starts_the_installed_dock_at_sign_in_for_good() {
-        let xml = task_xml(r"C:\Users\alex\AppData\Local\Programs\Desktop Dock\desktop-dock.exe", "S-1-5-21-1-2-3-1001");
+        let xml = task_xml(r"C:\Users\alex\AppData\Local\Programs\Desktop Dock\desktop-dock.exe", "S-1-5-21-1-2-3-1001", "Starts Desktop Dock when you sign in.");
+        assert!(xml.contains("<Description>Starts Desktop Dock when you sign in.</Description>"), "says what it's for");
         assert!(xml.contains("<LogonTrigger>") && xml.contains("<UserId>S-1-5-21-1-2-3-1001</UserId>"), "at this user's sign-in");
         assert!(xml.contains("<Arguments>--startup</Arguments>"), "says it was started at sign-in");
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"), "no administrator rights");
@@ -179,8 +183,9 @@ mod tests {
 
     #[test]
     fn odd_characters_in_the_folder_are_written_safely() {
-        let xml = task_xml(r"C:\Tom & Jerry's <apps>\desktop-dock.exe", "S-1-5-21-9");
+        let xml = task_xml(r"C:\Tom & Jerry's <apps>\desktop-dock.exe", "S-1-5-21-9", "Startet \"Desktop Dock\" & <mehr>");
         assert!(xml.contains(r"<Command>C:\Tom &amp; Jerry&apos;s &lt;apps&gt;\desktop-dock.exe</Command>"));
+        assert!(xml.contains("<Description>Startet &quot;Desktop Dock&quot; &amp; &lt;mehr&gt;</Description>"), "a translated description too");
         assert!(starts_program(&xml, r"C:\Tom & Jerry's <apps>\desktop-dock.exe"));
     }
 }

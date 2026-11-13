@@ -74,9 +74,15 @@ struct Reply {
     body: Vec<u8>,
 }
 
-const UNREACHABLE: &str = "Couldn't reach GitHub just now. Check your connection, or try again later.";
-const CUT_OFF: &str = "The connection to GitHub was cut off. Try again later.";
-const BUSY: &str = "GitHub didn't answer as it should just now. Try again later.";
+// In English here; said with `text::t`, in the language in use.
+const UNREACHABLE: &str = n!("Couldn't reach GitHub just now. Check your connection, or try again later.");
+const CUT_OFF: &str = n!("The connection to GitHub was cut off. Try again later.");
+const BUSY: &str = n!("GitHub didn't answer as it should just now. Try again later.");
+
+/// One of the texts above, as an error.
+fn said(english: &'static str) -> String {
+    crate::text::t(english).to_string()
+}
 
 /// Asks for one address: GitHub (https) or a test's own page on this computer (http). Redirects
 /// are followed only when `follow`, and from a test's page only to another of its pages; at most
@@ -98,17 +104,17 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
     let (secure, rest) = match url.split_once("://") {
         Some(("https", rest)) => (true, rest),
         Some(("http", rest)) if local_feed(url) => (false, rest),
-        _ => return Err(format!("Not an address the dock asks: {url}")),
+        _ => return Err(tr!("Not an address the dock asks: {address}", address = url)),
     };
     let (host_port, path) = rest.find('/').map_or((rest, "/"), |at| (&rest[..at], &rest[at..]));
     let (host, port) = match host_port.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse::<u16>().map_err(|_| format!("Not an address the dock asks: {url}"))?),
+        Some((host, port)) => (host, port.parse::<u16>().map_err(|_| tr!("Not an address the dock asks: {address}", address = url))?),
         None => (host_port, if secure { INTERNET_DEFAULT_HTTPS_PORT as u16 } else { INTERNET_DEFAULT_HTTP_PORT as u16 }),
     };
     unsafe {
         let session = WinHttpOpen(w!("DesktopDock-update-check"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
         if session.is_null() {
-            return Err(UNREACHABLE.into());
+            return Err(said(UNREACHABLE));
         }
         let protocols = (WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3).to_le_bytes();
         let _ = WinHttpSetOption(Some(session as *const c_void), WINHTTP_OPTION_SECURE_PROTOCOLS, Some(&protocols));
@@ -128,7 +134,7 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
         };
         if request.is_null() {
             close();
-            return Err(UNREACHABLE.into());
+            return Err(said(UNREACHABLE));
         }
         let _ = WinHttpSetOption(Some(request as *const c_void), WINHTTP_OPTION_DISABLE_FEATURE, Some(&WINHTTP_DISABLE_COOKIES.to_le_bytes()));
         if !follow || !secure {
@@ -136,7 +142,7 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
         }
         if WinHttpSendRequest(request, None, None, 0, 0, 0).is_err() || WinHttpReceiveResponse(request, std::ptr::null_mut()).is_err() {
             close();
-            return Err(UNREACHABLE.into());
+            return Err(said(UNREACHABLE));
         }
         let mut status = 0u32;
         let mut len = 4u32;
@@ -183,10 +189,10 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
         }
         close();
         if too_big {
-            return Err("GitHub sent more than a release's file should be, so it wasn't used.".into());
+            return Err(tr!("GitHub sent more than a release's file should be, so it wasn't used.").into());
         }
         if cut || expected.is_some_and(|length| status / 100 == 2 && body.len() != length) {
-            return Err(CUT_OFF.into());
+            return Err(said(CUT_OFF));
         }
         Ok(Reply { status, location, body })
     }
@@ -200,7 +206,7 @@ pub fn latest() -> Result<Version, String> {
         reply = get(&moved, false, 256 * 1024)?;
     }
     let tag = reply.location.as_deref().filter(|_| reply.status / 100 == 3).and_then(tag_from_location);
-    tag.and_then(version_from_tag).ok_or_else(|| "GitHub didn't say which version is the newest. Try again later.".to_string())
+    tag.and_then(version_from_tag).ok_or_else(|| tr!("GitHub didn't say which version is the newest. Try again later.").to_string())
 }
 
 /// Where GitHub sends "latest release" for a repository that has a new name or owner: the same
@@ -214,29 +220,29 @@ fn moved_latest(location: &str) -> bool {
 pub fn download(version: Version, dir: &Path) -> Result<PathBuf, String> {
     let base = format!("{}/download/v{}", feed(), shown(version));
     // A release without the files Update now needs: it's downloaded by hand instead.
-    let by_hand = format!("Version {} can't be updated to from here: download it from GitHub instead (What's new).", shown(version));
+    let by_hand = tr!("Version {version} can't be updated to from here: download it from GitHub instead (What's new).", version = shown(version));
     let sum = get(&format!("{base}/desktop-dock.exe.sha256"), true, 4096)?;
     match sum.status {
         200 => {}
         404 => return Err(by_hand),
-        _ => return Err(BUSY.into()),
+        _ => return Err(said(BUSY)),
     }
-    let want = sha256_from_file(&String::from_utf8_lossy(&sum.body)).ok_or("The release's checksum couldn't be read, so nothing was downloaded.")?;
+    let want = sha256_from_file(&String::from_utf8_lossy(&sum.body)).ok_or(tr!("The release's checksum couldn't be read, so nothing was downloaded."))?;
     let exe = get(&format!("{base}/desktop-dock.exe"), true, 64 * 1024 * 1024)?;
     match exe.status {
         200 if !exe.body.is_empty() => {}
         404 => return Err(by_hand),
-        _ => return Err(BUSY.into()),
+        _ => return Err(said(BUSY)),
     }
     if sha256(&exe.body) != Some(want) {
-        return Err("The download didn't match its checksum, so it wasn't used.".into());
+        return Err(tr!("The download didn't match its checksum, so it wasn't used.").into());
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't save the download: {}", crate::system::plain(&e.to_string())))?;
+    std::fs::create_dir_all(dir).map_err(|e| tr!("Couldn't save the download: {why}", why = crate::system::plain(&e.to_string())))?;
     let path = dir.join(format!("desktop-dock-{}.exe", shown(version)));
-    crate::store::atomic_write_bytes(&path, &exe.body).map_err(|e| format!("Couldn't save the download: {}", crate::system::plain(&e.to_string())))?;
+    crate::store::atomic_write_bytes(&path, &exe.body).map_err(|e| tr!("Couldn't save the download: {why}", why = crate::system::plain(&e.to_string())))?;
     if crate::setup::version_of(&path) != Some(version) {
         let _ = std::fs::remove_file(&path);
-        return Err("The download isn't the version it should be, so it wasn't used.".into());
+        return Err(tr!("The download isn't the version it should be, so it wasn't used.").into());
     }
     Ok(path)
 }
@@ -307,14 +313,14 @@ pub fn check_and_keep(home: &Path) -> Status {
 /// starts the new one. Only for an installed copy.
 pub fn install(version: Version, home: &Path) -> Result<(), String> {
     if !is_newer(version, this_version()) {
-        return Err(format!("Desktop Dock {} isn't newer than this one ({}), so nothing was installed.", shown(version), shown(this_version())));
+        return Err(tr!("Desktop Dock {version} isn't newer than this one ({this}), so nothing was installed.", version = shown(version), this = shown(this_version())));
     }
     let exe = download(version, &home.join("updates"))?;
     std::process::Command::new(&exe)
         .args(["--install", "--quiet", "--no-startup"])
         .current_dir(exe.parent().unwrap_or(home))
         .spawn()
-        .map_err(|e| format!("The new version didn't start: {}", crate::system::plain(&e.to_string())))?;
+        .map_err(|e| tr!("The new version didn't start: {why}", why = crate::system::plain(&e.to_string())))?;
     Ok(())
 }
 

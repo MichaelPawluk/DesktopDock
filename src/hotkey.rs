@@ -70,15 +70,15 @@ pub fn parse(text: &str) -> Result<Option<Hotkey>, String> {
             "ctrl" | "control" => modifiers |= MOD_CONTROL,
             "alt" => modifiers |= MOD_ALT,
             "shift" => modifiers |= MOD_SHIFT,
-            "" => return Err(format!("\"{text}\" isn't a shortcut (written like \"Ctrl+Shift+D\")")),
-            _ if key.is_some() => return Err(format!("\"{text}\" has more than one key")),
-            _ => key = Some(key_from_name(part).ok_or_else(|| format!("\"{part}\" isn't a key a shortcut can use"))?),
+            "" => return Err(tr!("\"{shortcut}\" isn't a shortcut (written like \"Ctrl+Shift+D\")", shortcut = text)),
+            _ if key.is_some() => return Err(tr!("\"{shortcut}\" has more than one key", shortcut = text)),
+            _ => key = Some(key_from_name(part).ok_or_else(|| tr!("\"{key}\" isn't a key a shortcut can use", key = part))?),
         }
     }
-    let key = key.ok_or_else(|| format!("\"{text}\" has no key, only Ctrl, Alt or Shift"))?;
+    let key = key.ok_or_else(|| tr!("\"{shortcut}\" has no key, only Ctrl, Alt or Shift", shortcut = text))?;
     let function_key = (0x70..=0x87).contains(&key);
     if modifiers & (MOD_CONTROL | MOD_ALT) == 0 && !function_key {
-        return Err(format!("\"{text}\" needs Ctrl or Alt, so it doesn't get in the way of typing"));
+        return Err(tr!("\"{shortcut}\" needs Ctrl or Alt, so it doesn't get in the way of typing", shortcut = text));
     }
     Ok(Some(Hotkey { modifiers, key }))
 }

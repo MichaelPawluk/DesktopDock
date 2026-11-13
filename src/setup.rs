@@ -188,7 +188,7 @@ fn recorded_install_dir() -> Option<PathBuf> {
 /// only administrators may write (Program Files, say), which Desktop Dock never asks for.
 fn install_dir_in(picked: &Path) -> Result<PathBuf, String> {
     if places::on_network(&picked.to_string_lossy()) {
-        return Err("That folder is on another computer. Choose one on this PC, so your dock works without the network.".into());
+        return Err(tr!("That folder is on another computer. Choose one on this PC, so your dock works without the network.").into());
     }
     let dir = if picked.file_name().is_some_and(|name| name.eq_ignore_ascii_case("Desktop Dock")) {
         picked.to_path_buf()
@@ -206,11 +206,11 @@ fn install_dir_in(picked: &Path) -> Result<PathBuf, String> {
     }
     match tried {
         Ok(()) => Ok(dir),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(tr!(
             "Only administrators can install there, and Desktop Dock installs without asking for that. Choose a folder of your own, like the one it suggests."
-                .into(),
-        ),
-        Err(e) => Err(format!("That folder can't be used: {}", system::plain(&e.to_string()))),
+        )
+        .into()),
+        Err(e) => Err(tr!("That folder can't be used: {why}", why = system::plain(&e.to_string()))),
     }
 }
 
@@ -333,12 +333,12 @@ impl Step {
     /// What the setup window says during it.
     fn words(self) -> &'static str {
         match self {
-            Step::Close => "Closing the dock that's running...",
-            Step::Copy => "Copying Desktop Dock...",
-            Step::StartMenu => "Adding it to the Start menu...",
-            Step::InstalledApps => "Adding it to Installed apps...",
-            Step::Startup => "Setting Start with Windows...",
-            Step::Start => "Starting your dock...",
+            Step::Close => tr!("Closing the dock that's running..."),
+            Step::Copy => tr!("Copying Desktop Dock..."),
+            Step::StartMenu => tr!("Adding it to the Start menu..."),
+            Step::InstalledApps => tr!("Adding it to Installed apps..."),
+            Step::Startup => tr!("Setting Start with Windows..."),
+            Step::Start => tr!("Starting your dock..."),
         }
     }
 
@@ -361,7 +361,7 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {}", dir.display(), system::plain(&e.to_string())))?;
+    std::fs::create_dir_all(dir).map_err(|e| tr!("Couldn't make {folder}: {why}", folder = dir.display(), why = system::plain(&e.to_string())))?;
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = dir.join("desktop-dock.exe");
     log(dir, &format!("installing {} from {}", shown(my_version()), me.display()));
@@ -376,7 +376,7 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
                 progress(Step::Close);
             }
             if !system::quit_running_dock() {
-                return Err("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.".into());
+                return Err(tr!("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.").into());
             }
             if !wait_until_free(Duration::from_secs(10)) {
                 log(dir, "the old dock was still running after 10 s; carrying on");
@@ -402,7 +402,7 @@ pub fn install(options: Options, dir: &Path, progress: &dyn Fn(Step)) -> Result<
 fn finish_install(options: Options, dir: &Path, me: &Path, exe: &Path, progress: &dyn Fn(Step)) -> Result<(), String> {
     if !same_path(me, exe) {
         progress(Step::Copy);
-        let bytes = std::fs::read(me).map_err(|e| format!("Couldn't read {}: {}", me.display(), system::plain(&e.to_string())))?;
+        let bytes = std::fs::read(me).map_err(|e| tr!("Couldn't read {file}: {why}", file = me.display(), why = system::plain(&e.to_string())))?;
         put_in_place(dir, &bytes)?;
         log(dir, &format!("copied to {}", exe.display()));
     }
@@ -425,7 +425,7 @@ fn finish_install(options: Options, dir: &Path, me: &Path, exe: &Path, progress:
     }
     if options.start {
         progress(Step::Start);
-        std::process::Command::new(exe).current_dir(dir).spawn().map_err(|e| format!("Installed, but it didn't start: {}", system::plain(&e.to_string())))?;
+        std::process::Command::new(exe).current_dir(dir).spawn().map_err(|e| tr!("Installed, but it didn't start: {why}", why = system::plain(&e.to_string())))?;
         log(dir, "started");
     }
     Ok(())
@@ -438,13 +438,13 @@ fn finish_install(options: Options, dir: &Path, me: &Path, exe: &Path, progress:
 fn put_in_place(dir: &Path, bytes: &[u8]) -> Result<(), String> {
     let exe = dir.join("desktop-dock.exe");
     let fresh = dir.join("desktop-dock.exe.new");
-    store::atomic_write_bytes(&fresh, bytes).map_err(|e| format!("Couldn't write the new version: {}", system::plain(&e.to_string())))?;
+    store::atomic_write_bytes(&fresh, bytes).map_err(|e| tr!("Couldn't write the new version: {why}", why = system::plain(&e.to_string())))?;
     let aside = dir.join(format!("desktop-dock.old-{}.exe", stamp()));
     let had_one = exe.exists();
     if had_one {
         if let Err(e) = rename_soon(&exe, &aside) {
             let _ = std::fs::remove_file(&fresh);
-            return Err(format!("Couldn't move the old version aside: {}", system::plain(&e.to_string())));
+            return Err(tr!("Couldn't move the old version aside: {why}", why = system::plain(&e.to_string())));
         }
     }
     if let Err(e) = rename_soon(&fresh, &exe) {
@@ -452,7 +452,7 @@ fn put_in_place(dir: &Path, bytes: &[u8]) -> Result<(), String> {
             let _ = rename_soon(&aside, &exe);
         }
         let _ = std::fs::remove_file(&fresh);
-        return Err(format!("Couldn't put the new version in place: {}", system::plain(&e.to_string())));
+        return Err(tr!("Couldn't put the new version in place: {why}", why = system::plain(&e.to_string())));
     }
     Ok(())
 }
@@ -486,7 +486,8 @@ fn create_shortcut(exe: &Path, dir: &Path) -> Result<PathBuf, String> {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.message())?;
         link.SetPath(&HSTRING::from(exe)).map_err(|e| e.message())?;
         link.SetWorkingDirectory(&HSTRING::from(dir)).map_err(|e| e.message())?;
-        let _ = link.SetDescription(w!("A lightweight, productivity-focused dock for your desktop"));
+        // (In the language in use as it's installed: Windows keeps the words as they're given.)
+        let _ = link.SetDescription(&wtr!("A lightweight, productivity-focused dock for your desktop"));
         let _ = link.SetIconLocation(&HSTRING::from(exe), 0);
         let file: IPersistFile = link.cast().map_err(|e| e.message())?;
         file.Save(&HSTRING::from(path.as_path()), true).map_err(|e| e.message())?;
@@ -500,7 +501,7 @@ fn write_uninstall_entry(exe: &Path, dir: &Path, size: u64) -> Result<(), String
         let mut key = HKEY::default();
         let path = HSTRING::from(uninstall_key());
         if RegCreateKeyExW(HKEY_CURRENT_USER, &path, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None) != ERROR_SUCCESS {
-            return Err("Couldn't add Desktop Dock to Installed apps.".into());
+            return Err(tr!("Couldn't add Desktop Dock to Installed apps.").into());
         }
         let text = |name: PCWSTR, value: &str| {
             let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
@@ -531,12 +532,12 @@ fn write_uninstall_entry(exe: &Path, dir: &Path, size: u64) -> Result<(), String
 /// Removes Desktop Dock: its shortcut, its Installed apps entry, Start with Windows, the program,
 /// its icon cache and logs; with `remove_dock`, your dock too. Returns what's left, if anything.
 pub fn uninstall(remove_dock: bool) -> Result<Option<PathBuf>, String> {
-    let dir = install_dir().ok_or("Windows didn't say where your programs go (LOCALAPPDATA).")?;
+    let dir = install_dir().ok_or(tr!("Windows didn't say where your programs go (LOCALAPPDATA)."))?;
     log(&dir, "removing Desktop Dock");
     if test_root().is_none() {
         close_settings_windows();
         if !system::quit_running_dock() {
-            return Err("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.".into());
+            return Err(tr!("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.").into());
         }
         let _ = wait_until_free(Duration::from_secs(10));
         let _ = crate::startup::set_starts_with_windows(false);
@@ -594,15 +595,17 @@ pub fn remove_old_copies(dir: &Path) {
 
 // ---- The windows ------------------------------------------------------------------------------
 
-/// What the setup window says and offers, for the version already installed (if any).
-fn setup_texts(installed: Option<(u16, u16, u16)>, mine: (u16, u16, u16)) -> (String, &'static str) {
+/// What the setup window says and offers, for the version already installed (if any), and
+/// whether that's an update (the Done page says so).
+fn setup_texts(installed: Option<(u16, u16, u16)>, mine: (u16, u16, u16)) -> (String, &'static str, bool) {
     match installed {
-        None => ("Installs Desktop Dock for you on this PC, with a Start menu shortcut. It doesn't need administrator rights.".into(), "Install"),
-        Some(old) if old < mine => (format!("Updates Desktop Dock from {} to {}. Your dock stays as it is.", shown(old), shown(mine)), "Update"),
-        Some(old) if old == mine => (format!("Desktop Dock {} is already installed. Install it again? Your dock stays as it is.", shown(old)), "Reinstall"),
+        None => (tr!("Installs Desktop Dock for you on this PC, with a Start menu shortcut. It doesn't need administrator rights.").into(), tr!("Install"), false),
+        Some(old) if old < mine => (tr!("Updates Desktop Dock from {old} to {new}. Your dock stays as it is.", old = shown(old), new = shown(mine)), tr!("Update"), true),
+        Some(old) if old == mine => (tr!("Desktop Dock {version} is already installed. Install it again? Your dock stays as it is.", version = shown(old)), tr!("Reinstall"), false),
         Some(old) => (
-            format!("A newer Desktop Dock ({}) is installed. Install this older one ({}) instead? Your dock stays as it is.", shown(old), shown(mine)),
-            "Install anyway",
+            tr!("A newer Desktop Dock ({installed}) is installed. Install this older one ({this}) instead? Your dock stays as it is.", installed = shown(old), this = shown(mine)),
+            tr!("Install anyway"),
+            false,
         ),
     }
 }
@@ -662,9 +665,9 @@ fn show(dialog: HWND, id: i32, on: bool) {
 fn show_where(dialog: HWND, dir: &Path, installed: bool) {
     set_text(dialog, IDC_WHERE, &dir.display().to_string());
     let note = if installed {
-        "It's installed here, so it updates in place."
+        tr!("It's installed here, so it updates in place.")
     } else if dir.join("dock.toml").is_file() {
-        "Your dock already in this folder will be used."
+        tr!("Your dock already in this folder will be used.")
     } else {
         ""
     };
@@ -687,7 +690,7 @@ fn start_install(dialog: HWND) {
         enable(dialog, id, false);
     }
     set_text(dialog, IDC_WHERE_NOTE, "");
-    set_text(dialog, IDC_STATUS, "Getting ready...");
+    set_text(dialog, IDC_STATUS, tr!("Getting ready..."));
     unsafe {
         if let Ok(bar) = GetDlgItem(Some(dialog), IDC_PROGRESS) {
             SendMessageW(bar, PBM_SETRANGE32, Some(WPARAM(0)), Some(LPARAM(100)));
@@ -733,19 +736,20 @@ fn install_failed(dialog: HWND, why: &str) {
 }
 
 /// What the Done page says: where the dock is, and how to bring it out.
-fn done_texts(updating: bool, startup: bool, edge: crate::config::Edge) -> (&'static str, String) {
+fn done_texts(updating: bool, startup: bool, edge: crate::config::Edge) -> (&'static str, &'static str) {
     use crate::config::Edge;
-    let heading = if updating { "Desktop Dock is updated" } else { "Desktop Dock is installed" };
-    let side = match edge {
-        Edge::Top => "top",
-        Edge::Bottom => "bottom",
-        Edge::Left => "left",
-        Edge::Right => "right",
+    let heading = if updating { tr!("Desktop Dock is updated") } else { tr!("Desktop Dock is installed") };
+    // A whole text for each edge and case, so each language can put its words in its own order.
+    let text = match (edge, startup) {
+        (Edge::Top, true) => tr!("Your dock is at the top of your screen: rest the pointer at the top edge to bring it out. It's in the Start menu too, and it starts with Windows."),
+        (Edge::Top, false) => tr!("Your dock is at the top of your screen: rest the pointer at the top edge to bring it out. It's in the Start menu too."),
+        (Edge::Bottom, true) => tr!("Your dock is at the bottom of your screen: rest the pointer at the bottom edge to bring it out. It's in the Start menu too, and it starts with Windows."),
+        (Edge::Bottom, false) => tr!("Your dock is at the bottom of your screen: rest the pointer at the bottom edge to bring it out. It's in the Start menu too."),
+        (Edge::Left, true) => tr!("Your dock is at the left of your screen: rest the pointer at the left edge to bring it out. It's in the Start menu too, and it starts with Windows."),
+        (Edge::Left, false) => tr!("Your dock is at the left of your screen: rest the pointer at the left edge to bring it out. It's in the Start menu too."),
+        (Edge::Right, true) => tr!("Your dock is at the right of your screen: rest the pointer at the right edge to bring it out. It's in the Start menu too, and it starts with Windows."),
+        (Edge::Right, false) => tr!("Your dock is at the right of your screen: rest the pointer at the right edge to bring it out. It's in the Start menu too."),
     };
-    let text = format!(
-        "Your dock is at the {side} of your screen: rest the pointer at the {side} edge to bring it out. It's in the Start menu too{}",
-        if startup { ", and it starts with Windows." } else { "." }
-    );
     (heading, text)
 }
 
@@ -763,9 +767,9 @@ fn show_done(dialog: HWND) {
     let edge = dir.and_then(|dir| crate::config::load(&dir.join("dock.toml")).ok()).map_or(crate::config::Edge::Top, |parsed| parsed.config.dock.edge);
     let (heading, text) = done_texts(updating, startup, edge);
     set_text(dialog, IDC_HEADING, heading);
-    set_text(dialog, IDC_TEXT, &text);
+    set_text(dialog, IDC_TEXT, text);
     set_text(dialog, IDC_STATUS, "");
-    set_text(dialog, IDOK.0, "Done");
+    set_text(dialog, IDOK.0, tr!("Done"));
     enable(dialog, IDOK.0, true);
     // The window shrinks to what's left (the heading and two lines), Done at the right below.
     unsafe {
@@ -857,12 +861,14 @@ pub fn run_setup_window() -> i32 {
         }
         match msg {
             WM_INITDIALOG => {
+                // First, while the window still has the .rc's English: some of it is replaced below.
+                crate::text::translate_dialog(dialog);
                 show_icon(dialog);
                 // Installed already (where its Installed apps entry says, or the usual place): an
                 // update goes there. Otherwise the usual place, unless you choose another.
                 let dir = install_dir();
                 let installed = dir.as_ref().map(|dir| dir.join("desktop-dock.exe")).filter(|exe| exe.is_file());
-                let (text, button) = setup_texts(installed.as_deref().and_then(version_of), my_version());
+                let (text, button, updating) = setup_texts(installed.as_deref().and_then(version_of), my_version());
                 set_text(dialog, IDC_TEXT, &text);
                 set_text(dialog, IDOK.0, button);
                 let startup = installed.is_none() || crate::startup::starts_with_windows();
@@ -874,7 +880,7 @@ pub fn run_setup_window() -> i32 {
                 }
                 enable(dialog, IDC_CHANGE, installed.is_none());
                 SETUP.with(|s| {
-                    *s.borrow_mut() = SetupState { dir, installed: installed.is_some(), updating: button == "Update", startup, ..SetupState::default() }
+                    *s.borrow_mut() = SetupState { dir, installed: installed.is_some(), updating, startup, ..SetupState::default() }
                 });
                 // Enter installs (the first button would otherwise be Change...).
                 unsafe {
@@ -936,7 +942,7 @@ pub fn run_setup_window() -> i32 {
                         (s.succeeded, s.target) = (true, 100);
                     }),
                     Some(Err(why)) => install_failed(dialog, &why),
-                    None => install_failed(dialog, "The install stopped before it finished."),
+                    None => install_failed(dialog, tr!("The install stopped before it finished.")),
                 }
                 1
             }
@@ -964,13 +970,14 @@ pub fn run_install(options: Options) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             if options.quiet {
-                // (Update now runs this: Dock settings > About says what went wrong.)
+                // (Update now runs this: Dock settings > About says what went wrong, in the words
+                // kept here. The reason ends the outer sentence, so its own full stop goes.)
                 let mut status = crate::update::Status::load(&dir);
-                status.error = format!("The update didn't install: {}", e.trim_end_matches('.'));
+                status.error = tr!("The update didn't install: {why}", why = e.trim_end_matches(['.', '\u{3002}']));
                 status.checked = crate::log::now_text();
                 status.save(&dir);
             } else {
-                system::message_box(&e, "Desktop Dock setup", MB_ICONINFORMATION | MB_OK);
+                system::message_box(&e, tr!("Desktop Dock setup"), MB_ICONINFORMATION | MB_OK);
             }
             1
         }
@@ -985,6 +992,12 @@ pub fn run_uninstall(quiet: bool, remove_dock: bool) -> i32 {
         }
         match msg {
             WM_INITDIALOG => {
+                crate::text::translate_dialog(dialog);
+                // Its button says uninstall in each language ("Remove" in English, as the Items
+                // page's button, which takes an item off: other languages need two words).
+                unsafe {
+                    let _ = SetDlgItemTextW(dialog, IDOK.0, &HSTRING::from(trc!("uninstall", "Remove")));
+                }
                 show_icon(dialog);
                 1
             }
@@ -1017,8 +1030,8 @@ pub fn run_uninstall(quiet: bool, remove_dock: bool) -> i32 {
         Ok(left) => {
             if !quiet {
                 let message = match left {
-                    Some(dir) => format!("Desktop Dock has been removed. Your dock is kept in {}, so installing again brings it back.", dir.display()),
-                    None => "Desktop Dock has been removed.".to_string(),
+                    Some(dir) => tr!("Desktop Dock has been removed. Your dock is kept in {folder}, so installing again brings it back.", folder = dir.display()),
+                    None => tr!("Desktop Dock has been removed.").to_string(),
                 };
                 system::message_box(&message, "Desktop Dock", MB_ICONINFORMATION | MB_OK);
             }
@@ -1094,6 +1107,9 @@ mod tests {
         assert!(setup_texts(Some((1, 0, 1)), mine).0.contains("from 1.0.1 to 1.0.2"));
         assert_eq!(setup_texts(Some(mine), mine).1, "Reinstall");
         assert_eq!(setup_texts(Some((2, 0, 0)), mine).1, "Install anyway");
+        // Only a newer version is an update, whatever its button says in the language in use.
+        let updates: Vec<bool> = [None, Some((1, 0, 1)), Some(mine), Some((2, 0, 0))].into_iter().map(|installed| setup_texts(installed, mine).2).collect();
+        assert_eq!(updates, [false, true, false, false]);
     }
 
     #[test]
@@ -1151,6 +1167,13 @@ mod tests {
         assert_eq!(done_texts(true, false, Edge::Top).0, "Desktop Dock is updated");
         assert!(done_texts(true, false, Edge::Top).1.ends_with("Start menu too."));
         assert!(done_texts(true, false, Edge::Left).1.starts_with("Your dock is at the left of your screen: rest the pointer at the left edge"));
+        // Every edge and case: the same words, only the edge and the ending differ.
+        for (edge, side) in [(Edge::Top, "top"), (Edge::Bottom, "bottom"), (Edge::Left, "left"), (Edge::Right, "right")] {
+            for (startup, end) in [(true, ", and it starts with Windows."), (false, ".")] {
+                let want = format!("Your dock is at the {side} of your screen: rest the pointer at the {side} edge to bring it out. It's in the Start menu too{end}");
+                assert_eq!(done_texts(false, startup, edge).1, want);
+            }
+        }
     }
 
     #[test]

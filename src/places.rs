@@ -28,32 +28,36 @@ enum Where {
 struct Place {
     /// How the first dock picks it (names differ by language).
     id: &'static str,
-    /// Its name if Windows doesn't give one.
+    /// Its name if Windows doesn't give one (shown in the language in use).
     english: &'static str,
     at: Where,
 }
 
 /// What the menus offer, in order. `None`: a dividing line.
 const PLACES: [Option<Place>; 14] = [
-    Some(Place { id: "this-pc", english: "This PC", at: Where::Shell("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") }),
-    Some(Place { id: "file-explorer", english: "File Explorer", at: Where::Shell(r"shell:AppsFolder\Microsoft.Windows.Explorer") }),
+    Some(Place { id: "this-pc", english: n!("This PC"), at: Where::Shell("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") }),
+    Some(Place { id: FILE_EXPLORER, english: n!("File Explorer"), at: Where::Shell(r"shell:AppsFolder\Microsoft.Windows.Explorer") }),
     None,
-    Some(Place { id: "desktop", english: "Desktop", at: Where::Folder(FOLDERID_Desktop, "shell:Desktop") }),
-    Some(Place { id: "documents", english: "Documents", at: Where::Folder(FOLDERID_Documents, "shell:Personal") }),
-    Some(Place { id: "downloads", english: "Downloads", at: Where::Folder(FOLDERID_Downloads, "shell:Downloads") }),
-    Some(Place { id: "pictures", english: "Pictures", at: Where::Folder(FOLDERID_Pictures, "shell:My Pictures") }),
-    Some(Place { id: "music", english: "Music", at: Where::Folder(FOLDERID_Music, "shell:My Music") }),
-    Some(Place { id: "videos", english: "Videos", at: Where::Folder(FOLDERID_Videos, "shell:My Video") }),
+    Some(Place { id: "desktop", english: n!("Desktop"), at: Where::Folder(FOLDERID_Desktop, "shell:Desktop") }),
+    Some(Place { id: "documents", english: n!("Documents"), at: Where::Folder(FOLDERID_Documents, "shell:Personal") }),
+    Some(Place { id: "downloads", english: n!("Downloads"), at: Where::Folder(FOLDERID_Downloads, "shell:Downloads") }),
+    Some(Place { id: "pictures", english: n!("Pictures"), at: Where::Folder(FOLDERID_Pictures, "shell:My Pictures") }),
+    Some(Place { id: "music", english: n!("Music"), at: Where::Folder(FOLDERID_Music, "shell:My Music") }),
+    Some(Place { id: "videos", english: n!("Videos"), at: Where::Folder(FOLDERID_Videos, "shell:My Video") }),
     None,
-    Some(Place { id: "network", english: "Network", at: Where::Shell("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}") }),
-    Some(Place { id: "control-panel", english: "Control Panel", at: Where::Shell("::{26EE0668-A00A-44D7-9371-BEB064C98683}") }),
+    Some(Place { id: "network", english: n!("Network"), at: Where::Shell("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}") }),
+    Some(Place { id: "control-panel", english: n!("Control Panel"), at: Where::Shell("::{26EE0668-A00A-44D7-9371-BEB064C98683}") }),
     Some(Place {
-        id: "settings",
-        english: "Settings",
+        id: SETTINGS,
+        english: n!("Settings"),
         at: Where::Shell(r"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"),
     }),
-    Some(Place { id: SHOW_DESKTOP, english: "Show desktop", at: Where::Shell(SHOW_DESKTOP_TARGET) }),
+    Some(Place { id: SHOW_DESKTOP, english: n!("Show desktop"), at: Where::Shell(SHOW_DESKTOP_TARGET) }),
 ];
+const FILE_EXPLORER: &str = "file-explorer";
+const SETTINGS: &str = "settings";
+/// File Explorer's name, as Windows' own Start menu names it.
+const FILE_EXPLORER_NAME: &str = r"@%SystemRoot%\system32\shell32.dll,-22067";
 const SHOW_DESKTOP: &str = "show-desktop";
 /// Show desktop's shell item. It's an action, not a place: Windows has nothing to "open" for it
 /// (see launch.rs), so it runs the way Windows' own Show desktop shortcut does.
@@ -75,7 +79,7 @@ pub fn all() -> Vec<Option<ItemConfig>> {
 
 /// One place as a dock item: Some(Some(item)), or None if it isn't on this PC.
 fn item(place: &Place) -> Option<Option<ItemConfig>> {
-    let name = local_name(place).unwrap_or_else(|| place.english.to_string());
+    let name = local_name(place).unwrap_or_else(|| crate::text::t(place.english).to_string());
     let mut item = match &place.at {
         Where::Shell(target) => ItemConfig::new(name, *target),
         Where::Folder(id, shell_name) => {
@@ -127,7 +131,7 @@ pub fn first_dock() -> String {
 
 /// The Recycle Bin's name in your language.
 pub fn recycle_bin_name() -> String {
-    clsid_name(RECYCLE_BIN.trim_start_matches("::")).unwrap_or_else(|| "Recycle Bin".into())
+    clsid_name(RECYCLE_BIN.trim_start_matches("::")).unwrap_or_else(|| tr!("Recycle Bin").into())
 }
 
 /// Where a shell name for one of your folders (`shell:Personal`) is on disk now, for Open file
@@ -150,13 +154,13 @@ pub fn described(target: &str) -> Option<String> {
         return None;
     }
     let ours = PLACES.iter().flatten().find(|place| matches!(place.at, Where::Shell(at) if at.eq_ignore_ascii_case(target)));
-    let name = shell_display_name(target).or_else(|| ours.map(|place| local_name(place).unwrap_or_else(|| place.english.to_string())));
+    let name = shell_display_name(target).or_else(|| ours.map(|place| local_name(place).unwrap_or_else(|| crate::text::t(place.english).to_string())));
     let app = lower.starts_with(r"shell:appsfolder\") && ours.is_none();
     Some(match (name, app) {
-        (Some(name), true) => format!("{name} (an app)"),
-        (Some(name), false) => format!("{name} (a Windows item)"),
-        (None, true) => "An app".into(),
-        (None, false) => "A Windows item".into(),
+        (Some(name), true) => tr!("{name} (an app)", name = name),
+        (Some(name), false) => tr!("{name} (a Windows item)", name = name),
+        (None, true) => tr!("An app").into(),
+        (None, false) => tr!("A Windows item").into(),
     })
 }
 
@@ -220,10 +224,16 @@ pub fn on_network(path: &str) -> bool {
 }
 
 /// Windows' own name for a place, in your language: the "@file,-id" reference Windows keeps
-/// for it in the registry, loaded as text. Cheap, and none of the shell's machinery comes into
-/// the dock. None if there's no such name (then the English one is used).
+/// for it in the registry (File Explorer: the one its Start menu entry uses), loaded as text.
+/// Cheap, and none of the shell's machinery comes into the dock. None if there's no such name:
+/// then the English one is used, or its translation.
 fn local_name(place: &Place) -> Option<String> {
     match &place.at {
+        _ if place.id == FILE_EXPLORER => load_indirect(FILE_EXPLORER_NAME),
+        // Settings: the dock's own word for it. Windows keeps its name in its app's resources,
+        // and reading them brings Windows' resource loader into the dock for good (about 0.6 MB
+        // and 40 handles) for one word, which each language's file already has as Windows has it.
+        _ if place.id == SETTINGS => None,
         Where::Shell(target) => clsid_name(target.trim_start_matches("shell:").trim_start_matches("::")),
         Where::Folder(id, _) => indirect_string(
             HKEY_LOCAL_MACHINE,
@@ -265,11 +275,18 @@ fn indirect_string(root: HKEY, key: &str, value: &str) -> Option<String> {
             return None;
         }
         let reference = String::from_utf16_lossy(&buffer[..(bytes as usize / 2).saturating_sub(1)]);
-        let mut text = [0u16; 260];
-        SHLoadIndirectString(&HSTRING::from(reference.as_str()), &mut text, None).ok()?;
-        let name = String::from_utf16_lossy(&text[..text.iter().position(|&c| c == 0).unwrap_or(text.len())]);
-        Some(name.trim().to_string()).filter(|name| !name.is_empty())
+        load_indirect(&reference)
     }
+}
+
+/// Loads the text an "@file,-id" (or "@{resources?ms-resource://…}") reference points to.
+fn load_indirect(reference: &str) -> Option<String> {
+    let mut text = [0u16; 260];
+    unsafe {
+        SHLoadIndirectString(&HSTRING::from(reference), &mut text, None).ok()?;
+    }
+    let name = String::from_utf16_lossy(&text[..text.iter().position(|&c| c == 0).unwrap_or(text.len())]);
+    Some(name.trim().to_string()).filter(|name| !name.is_empty())
 }
 
 #[cfg(test)]
@@ -334,12 +351,67 @@ mod tests {
         assert_eq!(on_disk(&home, "shell:Personal"), documents, "Open file location finds it");
     }
 
+    /// What the names Windows gives cost when they're looked up again and again, as each
+    /// right-click of the dock does: `cargo test --release -- --ignored looked_up_again --nocapture`.
+    #[test]
+    #[ignore]
+    fn names_looked_up_again_and_again_cost_no_memory() {
+        use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let usage = || unsafe {
+            let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+            let _ = GetProcessMemoryInfo(GetCurrentProcess(), &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, counters.cb);
+            let mut handles = 0u32;
+            let _ = GetProcessHandleCount(GetCurrentProcess(), &mut handles);
+            (counters.PrivateUsage as f64 / 1024.0, handles)
+        };
+        let runs: [(&str, Box<dyn Fn()>); 3] = [
+            ("File Explorer's name", Box::new(|| drop(load_indirect(FILE_EXPLORER_NAME)))),
+            ("This PC's name", Box::new(|| drop(clsid_name("{20D04FE0-3AEA-1069-A2D8-08002B30309D}")))),
+            ("every Windows item (a menu)", Box::new(|| drop(all()))),
+        ];
+        for (what, run) in runs {
+            for _ in 0..20 {
+                run(); // (the first loads what Windows needs: once)
+            }
+            let (kb, handles) = usage();
+            for _ in 0..500 {
+                run();
+            }
+            let (kb_after, handles_after) = usage();
+            println!("{what}: 500 more lookups: private {:+.0} KB ({:+.2} KB each), handles {:+}", kb_after - kb, (kb_after - kb) / 500.0, handles_after as i64 - handles as i64);
+        }
+    }
+
+    /// What the first menu's Windows items bring into the dock (their names, looked up once):
+    /// run alone, `cargo test --release -- --ignored --exact places::tests::the_first_menu_s_names`.
+    #[test]
+    #[ignore]
+    fn the_first_menu_s_names() {
+        use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let usage = || unsafe {
+            let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+            let _ = GetProcessMemoryInfo(GetCurrentProcess(), &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, counters.cb);
+            let mut handles = 0u32;
+            let _ = GetProcessHandleCount(GetCurrentProcess(), &mut handles);
+            (counters.PrivateUsage as f64 / 1024.0, handles)
+        };
+        let (kb, handles) = usage();
+        let names: Vec<String> = all().into_iter().flatten().map(|item| item.name).collect();
+        let (kb_after, handles_after) = usage();
+        println!("the first menu's {} Windows items: private {:+.0} KB, handles {:+}", names.len(), kb_after - kb, handles_after as i64 - handles as i64);
+    }
+
     #[test]
     fn names_come_from_windows_in_your_language() {
-        for place in PLACES.iter().flatten().filter(|place| !matches!(place.at, Where::Shell(target) if target.contains("AppsFolder"))) {
+        for place in PLACES.iter().flatten().filter(|place| place.id != SETTINGS) {
             let name = local_name(place).unwrap_or_else(|| panic!("{}: Windows has a name for it", place.english));
             assert!(!name.is_empty() && !name.starts_with('@'), "{}: {name}", place.english);
         }
+        // Settings: the dock's own word (see local_name).
+        let settings = PLACES.iter().flatten().find(|place| place.id == SETTINGS).expect("Settings is a place");
+        assert_eq!(local_name(settings), None);
         assert!(!recycle_bin_name().is_empty());
     }
 

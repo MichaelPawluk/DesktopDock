@@ -77,7 +77,7 @@ impl NamedLock {
         unsafe {
             let _ = CloseHandle(handle);
         }
-        Err("Your dock is busy saving in another window. Try again in a moment.".into())
+        Err(tr!("Your dock is busy saving in another window. Try again in a moment.").into())
     }
 }
 
@@ -178,7 +178,7 @@ impl Store {
         let _lock = lock_folder(self.folder())?;
         let now = config::read_text(&self.config).map_err(|e| e.to_string())?;
         if now != change.after {
-            return Err("Your dock has changed since, so undoing now would lose those changes.".into());
+            return Err(tr!("Your dock has changed since, so undoing now would lose those changes.").into());
         }
         self.write_locked(&change.before)
     }
@@ -192,15 +192,16 @@ impl Store {
     fn write_locked(&self, text: &str) -> Result<(), String> {
         let parsed = config::parse(text).map_err(|e| {
             log_warn!("not saved: the new text doesn't read back ({e})");
-            "That change would have left your dock unreadable, so it wasn't saved.".to_string()
+            tr!("That change would have left your dock unreadable, so it wasn't saved.").to_string()
         })?;
         if parsed.read_only {
-            return Err("Your dock was saved by a newer Desktop Dock, so this one doesn't change it.".into());
+            return Err(tr!("Your dock was saved by a newer Desktop Dock, so this one doesn't change it.").into());
         }
         if let Err(e) = self.backup_current() {
             log_warn!("backup before saving failed: {e}");
         }
-        atomic_write(&self.config, text).map_err(|e| format!("Couldn't save your dock: {e}."))
+        // (Windows' reason, in its own words and without its full stop: this sentence ends it.)
+        atomic_write(&self.config, text).map_err(|e| tr!("Couldn't save your dock: {why}.", why = e))
     }
 
     /// Every backup there is, newest first: recent (one a minute, the last 20), daily (the last 7)
@@ -332,8 +333,8 @@ fn same_line_ends(before: &str, after: String) -> String {
     if before.contains("\r\n") { after.replace("\r\n", "\n").replace('\n', "\r\n") } else { after }
 }
 
-/// What's said about an empty dock.toml.
-pub const EMPTY_FILE: &str = "The file is empty. The dock never saves it that way, so something else emptied it.";
+/// What's said about an empty dock.toml (in English: shown with `text::t`).
+pub const EMPTY_FILE: &str = n!("The file is empty. The dock never saves it that way, so something else emptied it.");
 
 /// Opens dock.toml at startup: migrates older formats (after a pinned backup), records
 /// last-good, and falls back to last-good if the file can't be read.
@@ -348,7 +349,7 @@ pub fn open(store: &Store) -> Opened {
         // The dock never saves an empty file: one is damage (a sync app or an editor that
         // crashed), not a dock with no items.
         if t.trim().is_empty() {
-            return Err(EMPTY_FILE.to_string());
+            return Err(crate::text::t(EMPTY_FILE).to_string());
         }
         config::parse(t).map(|p| (t.to_string(), p))
     });
@@ -358,10 +359,7 @@ pub fn open(store: &Store) -> Opened {
                 log_warn!("dock.toml: {warning}");
             }
             if parsed.read_only {
-                let notice = format!(
-                    "{} was saved by a newer version of Desktop Dock.\n\nIt's being used as it is, and won't be saved over.",
-                    path.display()
-                );
+                let notice = tr!("{file} was saved by a newer version of Desktop Dock.\n\nIt's being used as it is, and won't be saved over.", file = path.display());
                 return Opened { parsed, mode: Mode::ReadOnly, notice: Some(notice), unreadable };
             }
             let (text, parsed) = if parsed.needs_migration { migrate(store, text, parsed) } else { (text, parsed) };
@@ -370,30 +368,27 @@ pub fn open(store: &Store) -> Opened {
         }
         Err(error) => {
             log_error!("dock.toml can't be read: {error}");
-            let what = if unreadable {
-                format!("Your dock (dock.toml) couldn't be opened:\n\n{error}\n\n")
-            } else {
-                format!("dock.toml has an error:\n\n{error}\n\n")
+            let good = store.last_good().and_then(|good| config::parse(&good).ok());
+            // A whole text for each case (held or damaged, a working version or none).
+            let notice = match (unreadable, good.is_some()) {
+                (true, true) => tr!(
+                    "Your dock (dock.toml) couldn't be opened:\n\n{error}\n\nRunning your last working setup meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
+                    error = error
+                ),
+                (true, false) => tr!(
+                    "Your dock (dock.toml) couldn't be opened:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
+                    error = error
+                ),
+                (false, true) => tr!(
+                    "dock.toml has an error:\n\n{error}\n\nRunning your last working setup meanwhile. Fix the file and save it (the dock picks it up), or right-click the dock > Restore last working version.",
+                    error = error
+                ),
+                (false, false) => tr!(
+                    "dock.toml has an error:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. Fix the file and save it (the dock picks it up).",
+                    error = error
+                ),
             };
-            let then = if unreadable {
-                "The dock keeps trying, and switches to it as soon as it can be read."
-            } else {
-                "Fix the file and save it (the dock picks it up), or right-click the dock > Restore last working version."
-            };
-            match store.last_good().and_then(|good| config::parse(&good).ok()) {
-                Some(parsed) => Opened {
-                    parsed,
-                    mode: Mode::SafeStart,
-                    notice: Some(format!("{what}Running your last working setup meanwhile. {then}")),
-                    unreadable,
-                },
-                None => Opened {
-                    parsed: Parsed::default(),
-                    mode: Mode::SafeStart,
-                    notice: Some(format!("{what}There's no earlier working version, so the dock is empty meanwhile. {then}")),
-                    unreadable,
-                },
-            }
+            Opened { parsed: good.unwrap_or_default(), mode: Mode::SafeStart, notice: Some(notice), unreadable }
         }
     }
 }
@@ -471,8 +466,8 @@ pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<(
         }
     }
     let _ = std::fs::remove_file(&tmp);
-    // Windows' words end with a full stop; whoever says this ends the sentence.
-    let why = last_error.map(|e| e.message().trim_end_matches('.').to_string()).unwrap_or_default();
+    // Windows' words end with a full stop (in its own language); whoever says this ends the sentence.
+    let why = last_error.map(|e| e.message().trim_end_matches(['.', '\u{3002}']).to_string()).unwrap_or_default();
     Err(std::io::Error::other(why))
 }
 

@@ -137,7 +137,7 @@ pub fn startup_exe() -> Result<std::path::PathBuf, String> {
         None => {
             let me = std::env::current_exe().map_err(|e| e.to_string())?;
             if crate::home::is_dev_build() {
-                return Err("Start with Windows only works for the installed copy.".into());
+                return Err(tr!("Start with Windows only works for the installed copy.").into());
             }
             me
         }
@@ -241,7 +241,7 @@ pub fn control_down() -> bool {
 pub fn open_location(path: &str) -> Result<(), String> {
     let path = path.trim().trim_matches('"');
     if !std::path::Path::new(path).exists() {
-        return Err(format!("{path} isn't there any more."));
+        return Err(tr!("{path} isn't there any more.", path = path));
     }
     let windows = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into());
     // Explorer wants the quotes around the path only (/select,"C:\Program Files\…"); quoting
@@ -252,7 +252,7 @@ pub fn open_location(path: &str) -> Result<(), String> {
         .raw_arg(format!("{select}\"{path}\""))
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("Couldn't open File Explorer: {e}."))
+        .map_err(|e| tr!("Couldn't open File Explorer: {why}.", why = e))
 }
 
 /// Whether anyone can see the dock. While the session is locked or switched away from, or the
@@ -823,15 +823,15 @@ pub fn edge_note(screen: &Screen, edge: Edge) -> (Option<&'static str>, bool) {
     let taskbar_shown = !work_reaches_edge(screen, edge);
     let note = if monitor_beyond(screen.monitor, edge) {
         Some(match edge {
-            Edge::Top => "Another screen sits right above this one, so the pointer slides past the top edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
-            Edge::Bottom => "Another screen sits right below this one, so the pointer slides past the bottom edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
-            Edge::Left => "Another screen sits right beside this one on the left, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
-            Edge::Right => "Another screen sits right beside this one on the right, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below.",
+            Edge::Top => tr!("Another screen sits right above this one, so the pointer slides past the top edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below."),
+            Edge::Bottom => tr!("Another screen sits right below this one, so the pointer slides past the bottom edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below."),
+            Edge::Left => tr!("Another screen sits right beside this one on the left, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below."),
+            Edge::Right => tr!("Another screen sits right beside this one on the right, so the pointer slides past that edge instead of stopping there: the dock is hard to bring out with the mouse. Choose another screen or edge, or set a keyboard shortcut below."),
         })
     } else if taskbar_hides {
-        Some("The taskbar also hides along this edge, so the two come out together. To give the dock the edge to itself, move the taskbar (Taskbar settings), or use a keyboard shortcut (below) to bring out just the dock.")
+        Some(tr!("The taskbar also hides along this edge, so the two come out together. To give the dock the edge to itself, move the taskbar (Taskbar settings), or use a keyboard shortcut (below) to bring out just the dock."))
     } else if taskbar_shown {
-        Some("The taskbar is on this edge: the dock sits beside it, and pushing the pointer against the screen's edge (across the taskbar) brings it out. To give the dock the edge to itself, move the taskbar (Taskbar settings).")
+        Some(tr!("The taskbar is on this edge: the dock sits beside it, and pushing the pointer against the screen's edge (across the taskbar) brings it out. To give the dock the edge to itself, move the taskbar (Taskbar settings)."))
     } else {
         None
     };

@@ -29,7 +29,7 @@ impl RocketDock {
     /// Reads a `reg export` file (UTF-16 with its byte-order mark, UTF-8, or an older REGEDIT4
     /// export in this PC's code page).
     pub fn from_reg_file(path: &Path) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+        let bytes = std::fs::read(path).map_err(|e| tr!("Couldn't read {file}: {error}", file = path.display(), error = e))?;
         Self::from_reg_text(&crate::system::text_from_bytes(&bytes))
     }
 
@@ -71,7 +71,7 @@ impl RocketDock {
             };
         }
         if rd.icons.is_empty() {
-            return Err("That file isn't a RocketDock settings export.".into());
+            return Err(tr!("That file isn't a RocketDock settings export.").into());
         }
         Ok(rd)
     }
@@ -103,7 +103,7 @@ fn read_key(path: &str) -> Result<HashMap<String, String>, String> {
     unsafe {
         let mut key = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), None, KEY_READ, &mut key) != ERROR_SUCCESS {
-            return Err("RocketDock's settings aren't on this PC (it may never have run here).".into());
+            return Err(tr!("RocketDock's settings aren't on this PC (it may never have run here).").into());
         }
         let mut index = 0;
         loop {
@@ -203,7 +203,7 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
         // Only paths can be looked for: not shell locations, links or names Windows looks up.
         let is_shell_or_url = !matches!(target::classify(&command), Class::Absolute | Class::Relative);
         if !is_shell_or_url && !exists(&command) {
-            report.push(format!("{name}: {command} wasn't found"));
+            report.push(tr!("{name}: {target} wasn't found", name = name, target = command));
         }
         let args = get("Arguments");
         if !args.is_empty() {
@@ -214,7 +214,7 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
             if exists(&start_in) {
                 out.push_str(&format!("start_in = {}\n", toml_str(&start_in)));
             } else {
-                report.push(format!("{name}: its start-in folder {start_in} isn't there any more, so it starts in the program's own folder"));
+                report.push(tr!("{name}: its start-in folder {folder} isn't there any more, so it starts in the program's own folder", name = name, folder = start_in));
             }
         }
         match get("ShowCmd").as_str() {
@@ -232,18 +232,18 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
         }
     }
     if dropped_icons > 0 {
-        report.push(format!(
-            "{} couldn't be brought over; those items use the program's own icon",
-            if dropped_icons == 1 { "1 icon".to_string() } else { format!("{dropped_icons} icons") }
+        report.push(trn!(
+            "{n} icon couldn't be brought over; that item uses the program's own icon",
+            "{n} icons couldn't be brought over; those items use the program's own icon",
+            dropped_icons
         ));
     }
     if !versioned.is_empty() {
-        report.push(format!(
-            "{} a version number in {} folder ({}). If an update moves {}, the dock finds the new folder by itself",
-            if versioned.len() == 1 { "1 item has".to_string() } else { format!("{} items have", versioned.len()) },
-            if versioned.len() == 1 { "its" } else { "their" },
-            versioned.join(", "),
-            if versioned.len() == 1 { "it" } else { "them" }
+        report.push(trn!(
+            "{n} item has a version number in its folder ({names}). If an update moves it, the dock finds the new folder by itself",
+            "{n} items have a version number in their folder ({names}). If an update moves them, the dock finds the new folder by itself",
+            versioned.len(),
+            names = versioned.join(", ")
         ));
     }
     Imported { text: out, items: count, report }

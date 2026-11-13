@@ -4,6 +4,10 @@
 use crate::config::{DockSettings, Edge};
 use crate::motion::ease_out;
 
+/// The lines a name shown under its icon (names shown for every icon) may take; past them it's
+/// cut short with "…".
+pub const NAME_LINES: u32 = 2;
+
 /// A horizontal slot on the dock: an icon (icon width + gap) or a separator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Slot {
@@ -44,6 +48,13 @@ pub struct Geometry {
     pub label_w: f32,
     /// On a side, how wide the strip beside the panel may be; 0 on top or bottom.
     pub strip_w: f32,
+    /// Names shown for every icon: where they start away from the edge (just past the panel,
+    /// under the icons, or beside them on a side) and how much room they have that way
+    /// (`NAME_LINES`, or a line's length on a side). Both 0 when names show only on hover.
+    pub names_top: f32,
+    pub names_h: f32,
+    /// One line of a name (Segoe UI's own line height at the name size).
+    pub line_h: f32,
 }
 
 impl Geometry {
@@ -122,19 +133,32 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
         x += width;
     }
     let panel_w = (2.0 * pad_x - gap + x).max(2.0 * pad_x);
-    let panel_h = pad_top + icon + pad_bottom;
     let side = settings.edge.is_side();
     // On top or bottom, names go under the icons (room at the ends for the outer ones' names);
     // on a side, beside them, cut short beyond `label_w`, and the strip goes beside the panel.
     let margin_x = shadow.max(px(70.0));
     let (label_w, strip_w) = if side { (px(160.0), px(300.0)) } else { (0.0, 0.0) };
-    // The strip goes past every icon's name when those always show.
-    let names = if settings.show_labels && settings.always_show_labels { if side { px(8.0) + label_w } else { label_h } } else { 0.0 };
-    let (strip_top, strip_h) = (panel_h + px(6.0) + names, px(28.0));
+    let panel_h = pad_top + icon + pad_bottom;
+    // Names shown for every icon: just past the panel, on up to `NAME_LINES` under the icons, or
+    // one line beside them on a side. A pointed-at icon's full name goes just past its grown icon,
+    // among them (the names it would run over fade out while it shows).
+    let always = settings.show_labels && settings.always_show_labels;
+    let line_h = (settings.label_size * 1.4 * scale).ceil();
+    let (names_top, names_h) = match (always, side) {
+        (false, _) => (0.0, 0.0),
+        (true, true) => (panel_h + px(8.0), label_w),
+        (true, false) => (panel_h + px(2.0), NAME_LINES as f32 * line_h),
+    };
+    // Where a pointed-at icon's name ends, away from the edge (past its grown icon).
+    let full_name_end = pad_top + hover_icon + if side { px(8.0) + label_w } else { px(3.0) + label_h };
+    // The strip goes past the names when every icon's name shows.
+    let past_names = if always { (names_top + names_h).max(full_name_end) - panel_h } else { 0.0 };
+    let (strip_top, strip_h) = (panel_h + px(6.0) + past_names, px(28.0));
+    let names_end = names_top + names_h - panel_h + shadow;
     let below = if side {
-        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + px(8.0) + label_w + shadow).max(strip_top + strip_w + shadow - panel_h)
+        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + px(8.0) + label_w + shadow).max(names_end).max(strip_top + strip_w + shadow - panel_h)
     } else {
-        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + label_h + shadow).max(strip_top + strip_h + shadow - panel_h)
+        ((hover_icon - icon - pad_bottom).max(0.0) + bounce + label_h + shadow).max(names_end).max(strip_top + strip_h + shadow - panel_h)
     };
 
     let geo = Geometry {
@@ -160,6 +184,9 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
         edge: settings.edge,
         label_w,
         strip_w,
+        names_top,
+        names_h,
+        line_h,
     };
     Layout { geo, slots }
 }
@@ -877,27 +904,44 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_goes_past_the_names_when_they_always_show() {
+    fn names_shown_always_go_just_past_the_panel_on_up_to_two_lines() {
         use crate::config::Edge;
-        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            let on_hover = {
-                let mut s = settings();
-                s.edge = edge;
-                compute(&s, &small_dock(), 96, None).geo
-            };
-            let always = {
-                let mut s = settings();
-                s.edge = edge;
-                s.always_show_labels = true;
-                compute(&s, &small_dock(), 96, None).geo
-            };
-            assert_eq!(on_hover.strip_top, on_hover.panel_h + 6.0, "{edge:?}: just past the panel, as always");
-            // The names start just past the panel (2 px on top or bottom, 8 beside it on a side).
-            let names_end = if edge.is_side() { always.panel_h + 8.0 + always.label_w } else { always.panel_h + 2.0 + always.label_h };
-            assert!(always.strip_top >= names_end, "{edge:?}: the strip at {} starts past the names ({names_end})", always.strip_top);
-            let strip_end = always.strip_top + if edge.is_side() { always.strip_w } else { always.strip_h };
-            assert!(strip_end <= always.win_h as f32, "{edge:?}: and the window has room for it");
+        for dpi in [96, 144] {
+            let px = |v: f32| (v * dpi as f32 / 96.0).round();
+            for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+                let with = |always: bool| {
+                    let mut s = settings();
+                    s.edge = edge;
+                    s.always_show_labels = always;
+                    compute(&s, &small_dock(), dpi, None).geo
+                };
+                let (on_hover, g) = (with(false), with(true));
+                assert_eq!((on_hover.names_top, on_hover.names_h), (0.0, 0.0), "{edge:?}: names only on hover");
+                assert_eq!(on_hover.strip_top, on_hover.panel_h + px(6.0), "{edge:?}: just past the panel, as always");
+                // The panel and its icons as they were; the names just past it.
+                assert_eq!((g.panel_h, g.pad_top, g.icon), (on_hover.panel_h, on_hover.pad_top, on_hover.icon), "{edge:?}: the panel doesn't change");
+                assert_eq!(g.names_top, g.panel_h + px(if edge.is_side() { 8.0 } else { 2.0 }), "{edge:?}");
+                if edge.is_side() {
+                    assert_eq!(g.names_h, g.label_w, "{edge:?}: one line beside each icon, as long as there's room for");
+                } else {
+                    assert_eq!(g.names_h, NAME_LINES as f32 * g.line_h, "{edge:?}: two lines under each icon");
+                }
+                // A pointed-at icon's full name goes past its grown icon; the strip goes past it
+                // and past the names, and the window has room for all of it.
+                let full_name_end = g.pad_top + g.hover_icon + if edge.is_side() { px(8.0) + g.label_w } else { px(3.0) + g.label_h };
+                assert!(g.strip_top >= g.names_top + g.names_h && g.strip_top >= full_name_end, "{edge:?}: the strip at {} starts past the names", g.strip_top);
+                let strip_end = g.strip_top + if edge.is_side() { g.strip_w } else { g.strip_h };
+                assert!(strip_end.max(full_name_end).max(g.names_top + g.names_h) <= g.win_h as f32, "{edge:?}: the window has room");
+            }
         }
+    }
+
+    #[test]
+    fn names_shown_on_hover_leave_the_panel_as_it_was() {
+        // The panel and window with names on hover: icons and padding only, as before.
+        let g = compute(&settings(), &small_dock(), 96, None).geo;
+        assert_eq!(g.panel_h, g.pad_top + g.icon + 10.0);
+        assert_eq!(g.win_h as f32, (g.panel_h + (g.hover_icon - g.icon - 10.0).max(0.0) + g.bounce + g.label_h + g.shadow).max(g.strip_top + g.strip_h + g.shadow).ceil());
     }
 
     #[test]
