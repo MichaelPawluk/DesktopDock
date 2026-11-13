@@ -11,7 +11,7 @@ use crate::hotkey;
 use crate::home::Home;
 use crate::icons::{self, IconLoader, IconSource, IconWorker, Job, Part};
 use crate::layout::{self, DragZone, Layout};
-use crate::motion::{self, ClickGuard, Dwell};
+use crate::motion::{self, ClickGuard, Dwell, Push};
 use crate::render::Renderer;
 use crate::drop;
 use crate::pickers::{self, Pick};
@@ -52,6 +52,10 @@ use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, HOT_KEY_MODIFIERS, RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, UnregisterHotKey,
 };
+use windows::Win32::UI::Input::{
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE,
+    RegisterRawInputDevices,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
     ASFW_ANY, AllowSetForegroundWindow, GetMessageW, GetWindowRect, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
@@ -61,7 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_SHOWWINDOW, SetCoalescableTimer, SetCursorPos, SetLayeredWindowAttributes, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenuEx,
     TranslateMessage, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_CAPTURECHANGED, WM_HOTKEY, WM_MOUSEACTIVATE, WM_MOUSEFIRST, WM_MOUSELAST, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WM_CAPTURECHANGED, WM_HOTKEY, WM_INPUT, WM_MOUSEACTIVATE, WM_MOUSEFIRST, WM_MOUSELAST, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     MF_GRAYED, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{Error, HSTRING, PCWSTR, Result, w};
@@ -95,6 +99,11 @@ const REST_TIDY_MS: u32 = 2000;
 const SIDE_TEXT_GAP: f32 = 8.0;
 /// Staying out but sent away by a full-screen program: how often it looks whether it can come back.
 const COME_BACK_EVERY: Duration = Duration::from_secs(1);
+/// A pointer seen to move with no word from the mouse this long around it can't push past the
+/// edge (see `check_pointer_kind`). The mouse's word comes within a few milliseconds.
+const POINTER_KIND_AFTER: Duration = Duration::from_millis(50);
+/// Raw input's "button went down" flags, for all five buttons (RI_MOUSE_*_DOWN).
+const RAW_BUTTONS_DOWN: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0100;
 const UPDATES_FIRST_MS: u32 = 90 * 1000;
 const UPDATES_EVERY_MS: u32 = 24 * 60 * 60 * 1000;
 const UPDATE_TELL_AGAIN_MS: u32 = 10 * 60 * 1000;
@@ -417,6 +426,22 @@ pub struct Dock {
     tracking_mouse: bool,
     /// Pointer resting at the screen edge (popup delay).
     edge: Dwell,
+    /// The mouse pushing on into an edge the dock shares with a taskbar (see `wants_out`).
+    push: Push,
+    /// Hearing the mouse's own movement (Windows' raw input), near such an edge: see
+    /// `listen_for_push`.
+    listening: bool,
+    /// Windows wouldn't let it listen: it doesn't try again (and resting brings the dock out).
+    listen_failed: bool,
+    /// The pointer can push: a mouse or a touchpad, as far as the dock has seen. A pen, touch,
+    /// remote desktop or a program moving the pointer gives places, not movement, and can't
+    /// push past the edge: then resting there brings the dock out, as on a free edge.
+    pointer_pushes: bool,
+    /// While listening: where the pointer was at the last check, when it was last seen to have
+    /// moved, and when the mouse last said it moved (see `check_pointer_kind`).
+    pointer_was: Option<POINT>,
+    pointer_moved_at: Option<Instant>,
+    mouse_moved_at: Option<Instant>,
     /// Pointer away from the shown dock (hide delay).
     leave: Dwell,
     linger_until: Option<Instant>,
@@ -736,6 +761,13 @@ impl Dock {
             clicks: ClickGuard::default(),
             tracking_mouse: false,
             edge: Dwell::default(),
+            push: Push::default(),
+            listening: false,
+            listen_failed: false,
+            pointer_pushes: true,
+            pointer_was: None,
+            pointer_moved_at: None,
+            mouse_moved_at: None,
             leave: Dwell::default(),
             linger_until: None,
             resting: false,
@@ -1509,7 +1541,7 @@ impl Dock {
                 r#"{{"window":{{"rect":{},"visible":{},"reveal":{:.3},"reveal_target":{:.3}}},"#,
                 r#""mode":"{:?}","safe_mode":{},"locked":{},"bin_full":{},"menu_open":{},"dragging":{},"picking":{},"hovered":{},"#,
                 r#""hotkey":{},"hotkey_registered":{},"screen":{{"id":{},"number":{},"main":{},"dpi":{}}},"#,
-                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"always_show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","style":"{:?}","hover_glow":"{:?}","monitor":{},"auto_hide":{},"stay_out":"{:?}","edge":"{:?}"}},"resting":{},"lowered":{},"poll_ms":{},"reveal_point":{{"x":{},"y":{}}},"#,
+                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"always_show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","style":"{:?}","hover_glow":"{:?}","monitor":{},"auto_hide":{},"stay_out":"{:?}","edge":"{:?}"}},"resting":{},"lowered":{},"poll_ms":{},"reveal_point":{{"x":{},"y":{}}},"push":{{"shared":{},"listening":{},"pointer_pushes":{}}},"#,
                 r#""pixels":{{"scale":{},"icon":{},"zoom":{},"gap":{},"panel":{},"panel_top":{},"radius":{}}},"windows_dark":{},"#,
                 r#""undo":{},"strip":{},"drag":{},"group":{},"items":[{}]}}"#,
             ),
@@ -1557,6 +1589,9 @@ impl Dock {
             self.poll_ms,
             reveal_x,
             reveal_y,
+            self.place().shared(),
+            self.listening,
+            self.pointer_pushes,
             g.scale,
             g.icon,
             g.hover_icon,
@@ -2629,7 +2664,7 @@ impl Dock {
         }
         self.show_notice(match self.settings.edge {
             Edge::Top => tr!("Rest the pointer at the top of the screen to bring your dock out."),
-            Edge::Bottom => tr!("Rest the pointer at the bottom edge of the screen to bring your dock out."),
+            Edge::Bottom => tr!("Push the pointer against the bottom edge of the screen to bring your dock out."),
             Edge::Left => tr!("Rest the pointer at the left edge of the screen to bring your dock out."),
             Edge::Right => tr!("Rest the pointer at the right edge of the screen to bring your dock out."),
         });
@@ -2842,6 +2877,7 @@ impl Dock {
                 self.away_input_tick = system::last_input_tick();
                 self.start_timer(TIMER_PRESENCE, PRESENCE_CHECK_MS);
             }
+            self.listen_for_push(false);
             self.hide_now();
         } else if self.poll_ms == 0 {
             log_info!("back: polling resumed");
@@ -2871,6 +2907,7 @@ impl Dock {
 
     fn show(&mut self) {
         self.edge.reset();
+        self.push.reset();
         self.leave.reset();
         if !self.window_visible {
             self.recheck(); // in case the screen changed while the dock was hidden
@@ -2921,6 +2958,7 @@ impl Dock {
         self.pressed = None;
         self.leave.reset();
         self.edge.reset();
+        self.push.reset();
         self.linger_until = None;
         self.resting = true;
         if self.settings.stay_out == StayOut::BehindWindows {
@@ -2959,6 +2997,7 @@ impl Dock {
         self.lowered = false;
         self.resting = false;
         self.edge.reset();
+        self.push.reset();
     }
 
     /// Hiding turned off or on, or the way it stays out changed (dock.toml, Dock settings, the
@@ -3500,8 +3539,11 @@ impl Dock {
                 }
             }
             let at_edge = at_edge && !held;
-            let delay = Duration::from_millis(self.settings.popup_delay_ms);
-            if self.edge.update(at_edge, now, delay) && !self.fullscreen_in_front() {
+            // Near an edge shared with a taskbar, it hears the mouse, to tell a push past the
+            // edge from a rest on the taskbar (see `wants_out`).
+            self.listen_for_push(near && place.shared());
+            self.check_pointer_kind(pt, now);
+            if self.wants_out(&place, at_edge, now) && !self.fullscreen_in_front() {
                 self.show();
             }
             // Staying out, but sent away by a full-screen program: back once it's gone.
@@ -3536,10 +3578,14 @@ impl Dock {
             // Staying out behind windows: resting the pointer at the edge brings it over them
             // (as coming out does; never for a window dragged up there).
             if self.lowered {
+                self.listen_for_push(place.shared() && self.layout.near_edge(&place, pt.x, pt.y));
+                self.check_pointer_kind(pt, now);
                 let at_edge = self.layout.at_reveal_edge(&place, pt.x, pt.y) && !system::window_being_moved();
-                if self.edge.update(at_edge, now, Duration::from_millis(self.settings.popup_delay_ms)) {
+                if self.wants_out(&place, at_edge, now) {
                     self.raise();
                 }
+            } else {
+                self.listen_for_push(false);
             }
             // An open group never has the keyboard focus, so the dock looks: Esc, a click
             // anywhere else, or the pointer away from the dock and the pop-up for a moment.
@@ -3598,6 +3644,119 @@ impl Dock {
             });
         }
         None
+    }
+
+    /// The pointer asks for the dock at the edge: it rested there for the popup delay or, on an
+    /// edge shared with a taskbar, the mouse pushed on into the edge. Resting there is how the
+    /// taskbar's buttons are used (and their windows' previews seen), so on that edge it takes a
+    /// push, from a pointer that can push (see `pointer_pushes`).
+    fn wants_out(&mut self, place: &layout::Place, at_edge: bool, now: Instant) -> bool {
+        if place.shared() && self.listening && self.pointer_pushes {
+            self.edge.reset();
+            if !at_edge {
+                self.push.reset();
+            }
+            at_edge && self.push.done(now)
+        } else {
+            self.push.reset();
+            self.edge.update(at_edge, now, Duration::from_millis(self.settings.popup_delay_ms))
+        }
+    }
+
+    /// Hears the mouse's own movement while the pointer is near an edge shared with a taskbar,
+    /// and nowhere else (Windows' raw input: it only reads the movement, holding up, changing or
+    /// taking nothing from other programs). Should Windows refuse, resting at the edge brings
+    /// the dock out there as on any edge.
+    fn listen_for_push(&mut self, on: bool) {
+        if on == self.listening || (on && self.listen_failed) {
+            return;
+        }
+        let Some(hwnd) = self.hwnd else { return };
+        let device = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // generic desktop controls
+            usUsage: 0x02,     // a mouse (touchpads included)
+            dwFlags: if on { RIDEV_INPUTSINK } else { RIDEV_REMOVE },
+            hwndTarget: if on { hwnd } else { HWND::default() },
+        };
+        if let Err(e) = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) } {
+            log_warn!("couldn't {} the mouse's movement: {e}; resting at the edge brings the dock out", if on { "hear" } else { "stop hearing" });
+            self.listen_failed = true;
+        }
+        self.listening = on && !self.listen_failed;
+        self.push.reset();
+        self.pointer_was = None;
+        self.pointer_moved_at = None;
+    }
+
+    /// The mouse moved (raw input, while listening). Into the edge with the pointer on it, it's
+    /// pushing; away from it, or with a button pressed, it isn't. A pointer that gives places,
+    /// not movement, can't push.
+    fn on_raw_input(&mut self, lparam: LPARAM) {
+        if !self.listening {
+            return;
+        }
+        let mut input = RAWINPUT::default();
+        let mut size = size_of::<RAWINPUT>() as u32;
+        let read = unsafe {
+            GetRawInputData(HRAWINPUT(lparam.0 as _), RID_INPUT, Some(&mut input as *mut RAWINPUT as *mut _), &mut size, size_of::<RAWINPUTHEADER>() as u32)
+        };
+        if read == 0 || read == u32::MAX || input.header.dwType != RIM_TYPEMOUSE.0 {
+            return;
+        }
+        let mouse = unsafe { input.data.mouse };
+        let pressed = unsafe { mouse.Anonymous.Anonymous.usButtonFlags } & RAW_BUTTONS_DOWN != 0;
+        if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
+            self.set_pointer_pushes(false);
+            self.push.reset();
+            return;
+        }
+        let (dx, dy) = (mouse.lLastX, mouse.lLastY);
+        if dx == 0 && dy == 0 {
+            if pressed {
+                self.push.reset(); // a click on the taskbar
+            }
+            return;
+        }
+        let now = Instant::now();
+        self.mouse_moved_at = Some(now);
+        self.set_pointer_pushes(true);
+        let place = self.place();
+        let at_edge = system::cursor_pos().is_some_and(|pt| self.layout.at_reveal_edge(&place, pt.x, pt.y));
+        let into = place.into_edge(dx, dy);
+        if pressed || !at_edge || into < 0 {
+            self.push.reset();
+        } else if into > 0 {
+            self.push.moved(now);
+        }
+    }
+
+    /// While listening: a pointer that moves without the mouse saying so (a pen, touch, remote
+    /// desktop, a program moving it) can't push. Decided a moment after the move, so that the
+    /// mouse's own word, which can come just after it, is in by then.
+    fn check_pointer_kind(&mut self, pt: POINT, now: Instant) {
+        if !self.listening {
+            return;
+        }
+        if self.pointer_was.is_some_and(|was| (was.x, was.y) != (pt.x, pt.y)) && self.pointer_moved_at.is_none() {
+            self.pointer_moved_at = Some(now);
+        }
+        self.pointer_was = Some(pt);
+        let Some(moved) = self.pointer_moved_at.filter(|&moved| now.saturating_duration_since(moved) >= POINTER_KIND_AFTER) else { return };
+        self.pointer_moved_at = None;
+        if !self.mouse_moved_at.is_some_and(|heard| heard + POINTER_KIND_AFTER >= moved) {
+            self.set_pointer_pushes(false);
+        }
+    }
+
+    fn set_pointer_pushes(&mut self, pushes: bool) {
+        if pushes != self.pointer_pushes {
+            self.pointer_pushes = pushes;
+            if pushes {
+                log_info!("a mouse at the edge: pushing past the edge brings the dock out where the taskbar is");
+            } else {
+                log_info!("a pointer that can't push past the edge (a pen, touch or remote desktop): resting there brings the dock out");
+            }
+        }
     }
 
     fn set_poll(&mut self, ms: u32) {
@@ -4038,7 +4197,12 @@ impl Dock {
                 self.summon();
                 (done, None)
             }
+            WM_INPUT => {
+                self.on_raw_input(lparam);
+                (None, None) // and Windows' own handling, which tidies up after it
+            }
             WM_DESTROY => {
+                self.listen_for_push(false);
                 if let Some(hwnd) = self.hwnd.filter(|_| self.hotkey.take().is_some()) {
                     unsafe {
                         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);

@@ -32,7 +32,7 @@ locked = false             # true: no dragging icons around, off, or onto the do
 edge = "top"               # the screen edge it's on: "top", "bottom", "left" or "right" (beside a taskbar on that edge, never over it)
 language = "auto"          # the language it speaks: "auto" (Windows' display language), or "en", "de", "fr", "es", "pt-BR", "ru", "zh-CN", "ja"
 auto_hide = true           # false: the dock stays out when you're not using it (right-click > Hide automatically)
-stay_out = "behind-windows" # how it stays out: "behind-windows" (windows cover it; rest the pointer at the edge to bring it over them) or "on-top"
+stay_out = "behind-windows" # how it stays out: "behind-windows" (windows cover it; rest the pointer at the edge, or push it there where the taskbar is, to bring it over them) or "on-top"
 check_updates = false      # true: ask GitHub once a day whether there's a newer version (Dock settings > About)
 
 [[item]]

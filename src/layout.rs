@@ -449,6 +449,24 @@ impl Place {
         }
     }
 
+    /// A taskbar (or another bar) sits on this edge: the dock's own edge is inside the screen's.
+    /// The pointer there is often on the taskbar's buttons, so resting isn't enough to bring the
+    /// dock out: the mouse has to push on into the edge (see `motion::Push`).
+    pub fn shared(&self) -> bool {
+        self.screen_edge != self.dock_edge
+    }
+
+    /// How far a movement of the mouse (`dx`, `dy`, as the mouse reports it) goes into the
+    /// screen's edge; negative, away from it.
+    pub fn into_edge(&self, dx: i32, dy: i32) -> i32 {
+        match self.edge {
+            Edge::Top => -dy,
+            Edge::Bottom => dy,
+            Edge::Left => -dx,
+            Edge::Right => dx,
+        }
+    }
+
     /// The screen point `along` the dock and `away` from the screen's edge.
     pub fn point(&self, along: i32, away: i32) -> (i32, i32) {
         match self.edge {
@@ -633,6 +651,26 @@ mod tests {
             assert!(!layout.at_reveal_edge(&place, x, y) && !layout.near_edge(&place, x, y), "{:?}: past the edge, another screen", place.edge);
             let (x, y) = place.point(-200, 0);
             assert!(!layout.at_reveal_edge(&place, x, y), "{:?}: beyond the dock's span", place.edge);
+        }
+    }
+
+    #[test]
+    fn a_taskbar_on_the_edge_makes_it_shared_and_a_push_goes_into_each_edge() {
+        // Moving the mouse down, up, left and right: into the edge is positive on each.
+        let place = |edge, screen_edge, dock_edge| Place { edge, start: 0, screen_edge, dock_edge };
+        assert!(place(Edge::Bottom, 1079, 1079 - 48).shared(), "the taskbar shown at the bottom");
+        assert!(!place(Edge::Bottom, 1079, 1079).shared(), "a free edge, or a taskbar that hides itself");
+        assert!(place(Edge::Top, 0, 48).shared());
+        let moves = [(0, 5), (0, -5), (-5, 0), (5, 0)];
+        let into = [
+            (Edge::Top, [-5, 5, 0, 0]),
+            (Edge::Bottom, [5, -5, 0, 0]),
+            (Edge::Left, [0, 0, 5, -5]),
+            (Edge::Right, [0, 0, -5, 5]),
+        ];
+        for (edge, expected) in into {
+            let got: Vec<i32> = moves.iter().map(|&(dx, dy)| place(edge, 0, 0).into_edge(dx, dy)).collect();
+            assert_eq!(got, expected, "{edge:?}");
         }
     }
 

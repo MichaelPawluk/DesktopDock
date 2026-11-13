@@ -743,8 +743,8 @@ fn done_texts(updating: bool, startup: bool, edge: crate::config::Edge) -> (&'st
     let text = match (edge, startup) {
         (Edge::Top, true) => tr!("Your dock is at the top of your screen: rest the pointer at the top edge to bring it out. It's in the Start menu too, and it starts with Windows."),
         (Edge::Top, false) => tr!("Your dock is at the top of your screen: rest the pointer at the top edge to bring it out. It's in the Start menu too."),
-        (Edge::Bottom, true) => tr!("Your dock is at the bottom of your screen: rest the pointer at the bottom edge to bring it out. It's in the Start menu too, and it starts with Windows."),
-        (Edge::Bottom, false) => tr!("Your dock is at the bottom of your screen: rest the pointer at the bottom edge to bring it out. It's in the Start menu too."),
+        (Edge::Bottom, true) => tr!("Your dock is at the bottom of your screen: push the pointer against the bottom edge to bring it out. It's in the Start menu too, and it starts with Windows."),
+        (Edge::Bottom, false) => tr!("Your dock is at the bottom of your screen: push the pointer against the bottom edge to bring it out. It's in the Start menu too."),
         (Edge::Left, true) => tr!("Your dock is at the left of your screen: rest the pointer at the left edge to bring it out. It's in the Start menu too, and it starts with Windows."),
         (Edge::Left, false) => tr!("Your dock is at the left of your screen: rest the pointer at the left edge to bring it out. It's in the Start menu too."),
         (Edge::Right, true) => tr!("Your dock is at the right of your screen: rest the pointer at the right edge to bring it out. It's in the Start menu too, and it starts with Windows."),
@@ -1167,10 +1167,12 @@ mod tests {
         assert_eq!(done_texts(true, false, Edge::Top).0, "Desktop Dock is updated");
         assert!(done_texts(true, false, Edge::Top).1.ends_with("Start menu too."));
         assert!(done_texts(true, false, Edge::Left).1.starts_with("Your dock is at the left of your screen: rest the pointer at the left edge"));
-        // Every edge and case: the same words, only the edge and the ending differ.
-        for (edge, side) in [(Edge::Top, "top"), (Edge::Bottom, "bottom"), (Edge::Left, "left"), (Edge::Right, "right")] {
+        // Every edge and case: the same words, only the edge and the ending differ. At the bottom,
+        // where the taskbar usually is too, it takes a push past the edge (resting there is using
+        // the taskbar).
+        for (edge, side, how) in [(Edge::Top, "top", "rest the pointer at"), (Edge::Bottom, "bottom", "push the pointer against"), (Edge::Left, "left", "rest the pointer at"), (Edge::Right, "right", "rest the pointer at")] {
             for (startup, end) in [(true, ", and it starts with Windows."), (false, ".")] {
-                let want = format!("Your dock is at the {side} of your screen: rest the pointer at the {side} edge to bring it out. It's in the Start menu too{end}");
+                let want = format!("Your dock is at the {side} of your screen: {how} the {side} edge to bring it out. It's in the Start menu too{end}");
                 assert_eq!(done_texts(false, startup, edge).1, want);
             }
         }

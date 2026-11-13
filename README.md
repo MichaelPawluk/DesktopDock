@@ -52,8 +52,8 @@ Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\De
 - **Rearrange:** drag icons to new spots. To remove one, drag it off the dock. An Undo button appears for a few seconds, and right-click > Put back restores anything removed recently.
 - **Groups:** right-click an icon > Move to group > New group, or drag an icon onto an existing group. Click a group to open it, then drag items in, out or around inside it.
 - **Lock icons:** right-click > Lock icons prevents accidental dragging. Hold Ctrl to move an icon anyway.
-- **Keep it out:** right-click > Hide automatically (untick it) and the dock stays out instead of hiding. Dock settings > Behaviour chooses whether it stays behind your windows (rest the pointer at the edge to bring it over them) or on top of them.
-- **Move it to another edge:** Dock settings > Screen > Screen edge: Top, Bottom, Left or Right. On an edge the taskbar shares, the dock sits just inside the taskbar and comes out when you push the pointer against the screen's edge.
+- **Keep it out:** right-click > Hide automatically (untick it) and the dock stays out instead of hiding. Dock settings > Behaviour chooses whether it stays behind your windows (rest the pointer at the edge to bring it over them, or push it against the edge where the taskbar is) or on top of them.
+- **Move it to another edge:** Dock settings > Screen > Screen edge: Top, Bottom, Left or Right. On an edge the taskbar shares, the dock sits just inside the taskbar and comes out when you push the pointer on into the screen's edge: resting there is for the taskbar's buttons, so it leaves the dock where it is.
 - **Keyboard shortcut:** set one in Dock settings > Screen (for example Ctrl+Shift+D) to show the dock. Press it again, or Esc, to hide it.
 - **Change an icon:** right-click > Change icon… and pick your own image, one of the program's icons, or a Windows icon.
 - **Everything else:** right-click > Dock settings…

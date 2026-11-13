@@ -59,6 +59,41 @@ impl Dwell {
     }
 }
 
+/// The mouse pushed on into the screen's edge where the pointer has stopped: done once the push
+/// has gone on for `FOR`, never pausing longer than `GAP`. Aiming at something on the edge (a
+/// taskbar button) stops there, and the overshoot of a quick move ends sooner, so neither counts.
+#[derive(Debug, Default)]
+pub struct Push {
+    since: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl Push {
+    pub const FOR: Duration = Duration::from_millis(250);
+    pub const GAP: Duration = Duration::from_millis(100);
+
+    /// The mouse moved into the edge, with the pointer on it.
+    pub fn moved(&mut self, now: Instant) {
+        if self.last.is_none_or(|last| now.saturating_duration_since(last) > Self::GAP) {
+            self.since = Some(now);
+        }
+        self.last = Some(now);
+    }
+
+    /// Pushed long enough, and still pushing.
+    pub fn done(&self, now: Instant) -> bool {
+        match (self.since, self.last) {
+            (Some(since), Some(last)) => now.saturating_duration_since(last) <= Self::GAP && last.saturating_duration_since(since) >= Self::FOR,
+            _ => false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.since = None;
+        self.last = None;
+    }
+}
+
 /// Ignores a second click on the same item shortly after it launched, so a habitual
 /// double-click opens one copy. The window counts from the last launch that went through.
 #[derive(Debug, Default)]
@@ -209,5 +244,59 @@ mod tests {
         assert!(!dwell.update(false, start + Duration::from_millis(200), delay));
         assert!(!dwell.update(true, start + Duration::from_millis(400), delay));
         assert!(dwell.update(true, start + Duration::from_millis(750), delay));
+    }
+
+    /// The mouse reports movement into the edge every `every` ms from `from` to `to` (ms).
+    fn pushed(push: &mut Push, start: Instant, from: u64, to: u64, every: u64) {
+        let mut t = from;
+        while t <= to {
+            push.moved(start + Duration::from_millis(t));
+            t += every;
+        }
+    }
+
+    #[test]
+    fn a_push_that_goes_on_is_done() {
+        let start = Instant::now();
+        let mut push = Push::default();
+        pushed(&mut push, start, 0, 240, 8); // a 125 Hz mouse
+        assert!(!push.done(start + Duration::from_millis(248)), "not long enough yet");
+        pushed(&mut push, start, 248, 264, 8);
+        assert!(push.done(start + Duration::from_millis(270)));
+    }
+
+    #[test]
+    fn resting_on_the_edge_or_the_overshoot_of_a_quick_move_is_no_push() {
+        let start = Instant::now();
+        let mut push = Push::default();
+        assert!(!push.done(start + Duration::from_secs(5)), "resting: the mouse reports nothing");
+        // A quick move onto a taskbar button runs on a little past the edge, then stops.
+        pushed(&mut push, start, 0, 150, 8);
+        for after in [150, 300, 1000, 5000] {
+            assert!(!push.done(start + Duration::from_millis(after)), "{after} ms");
+        }
+        // A twitch of the hand now and then while resting there.
+        for twitch in [1500, 1700, 1900, 2100] {
+            push.moved(start + Duration::from_millis(twitch));
+            assert!(!push.done(start + Duration::from_millis(twitch)), "twitch at {twitch} ms");
+        }
+    }
+
+    #[test]
+    fn a_pause_starts_the_push_over_and_a_finished_one_stops_counting() {
+        let start = Instant::now();
+        let mut push = Push::default();
+        pushed(&mut push, start, 0, 200, 10);
+        pushed(&mut push, start, 320, 500, 10); // paused 120 ms: counts from 320
+        assert!(!push.done(start + Duration::from_millis(500)));
+        pushed(&mut push, start, 510, 570, 10);
+        assert!(push.done(start + Duration::from_millis(575)));
+        assert!(!push.done(start + Duration::from_millis(700)), "it stopped: no longer pushing");
+        // A slow push, its reports up to 90 ms apart, still counts.
+        let mut slow = Push::default();
+        pushed(&mut slow, start, 0, 270, 90);
+        assert!(slow.done(start + Duration::from_millis(275)));
+        slow.reset();
+        assert!(!slow.done(start + Duration::from_millis(275)));
     }
 }
