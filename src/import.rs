@@ -167,8 +167,8 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
     let effect = if setting("IconActivationFX") == "0" { "none" } else { "bounce" };
     out.push_str(&format!("launch_effect = \"{effect}\"\n"));
     // Where it is, and whether it hides: RocketDock's Screen Position (Top, Bottom, Left, Right)
-    // and Autohide; when it doesn't hide, its Layering (Always on top, or Normal and Always on
-    // bottom, where windows cover it).
+    // and Autohide; when it doesn't hide, its Layering (Always on top; Normal, where windows
+    // cover it until the pointer is at the edge; Always on bottom, where they always do).
     let edge = match number("Side", 0) {
         1 => "bottom",
         2 => "left",
@@ -179,7 +179,11 @@ pub fn convert(rd: &RocketDock, exists: impl Fn(&str) -> bool, icon_count: impl 
     let hides = setting("AutoHide") != "0";
     out.push_str(&format!("auto_hide = {hides}   # RocketDock: AutoHide\n"));
     if !hides {
-        let stay_out = if number("zOrderMode", 0) == 0 { "on-top" } else { "behind-windows" };
+        let stay_out = match number("zOrderMode", 0) {
+            0 => "on-top",
+            2 => "always-behind",
+            _ => "behind-windows",
+        };
         out.push_str(&format!("stay_out = \"{stay_out}\"   # RocketDock: zOrderMode\n"));
     }
 
@@ -431,9 +435,10 @@ mod tests {
         for (side, edge) in [("0", Edge::Top), ("1", Edge::Bottom), ("2", Edge::Left), ("3", Edge::Right), ("7", Edge::Top)] {
             assert_eq!(dock(&[("Side", side)]).0, edge, "Side {side}");
         }
-        // Not hiding: Always on top stays over windows; Normal and Always on bottom go under them.
+        // Not hiding: Always on top stays over windows; Normal goes under them, coming over at the
+        // edge; Always on bottom stays under them.
         assert_eq!(dock(&[("AutoHide", "0"), ("zOrderMode", "0")]), (Edge::Top, false, StayOut::OnTop));
         assert_eq!(dock(&[("AutoHide", "0"), ("zOrderMode", "1")]), (Edge::Top, false, StayOut::BehindWindows));
-        assert_eq!(dock(&[("Side", "1"), ("AutoHide", "0"), ("zOrderMode", "2")]), (Edge::Bottom, false, StayOut::BehindWindows));
+        assert_eq!(dock(&[("Side", "1"), ("AutoHide", "0"), ("zOrderMode", "2")]), (Edge::Bottom, false, StayOut::AlwaysBehind));
     }
 }

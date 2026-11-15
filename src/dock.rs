@@ -228,6 +228,11 @@ const WM_APP_MISSING_CHECKED: u32 = WM_APP + 12;
 const WM_APP_STAMPS_CHECKED: u32 = WM_APP + 13;
 /// The update check helper finished (see `check_for_updates`).
 const WM_APP_UPDATES_CHECKED: u32 = WM_APP + 14;
+/// Windows changed order with the desktop in use (`system::DesktopNews`): Show desktop may have
+/// lifted it over a dock resting behind windows.
+const WM_APP_DESKTOP_NEWS: u32 = WM_APP + 15;
+/// After that news, how long the dock looks quickly for the desktop being lifted over it.
+const DESKTOP_WATCH_FOR: Duration = Duration::from_millis(600);
 /// How often, at most, the dock looks for programs updated since their icons were made.
 const STAMP_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How long the dock stays out after the settings window's last change.
@@ -448,8 +453,13 @@ pub struct Dock {
     /// Staying out (auto_hide off): it's resting, nobody using it (see `rest`).
     resting: bool,
     /// Staying out behind windows: it's at the bottom of the windows now, under any that cover
-    /// it (resting the pointer at the edge brings it over them: see `raise`).
+    /// it (resting the pointer at the edge brings it over them, unless it's always behind: see
+    /// `raise`).
     lowered: bool,
+    /// Staying out behind windows: hears Show desktop lift the desktop (see `onto_desktop`).
+    desktop_news: Option<system::DesktopNews>,
+    /// Until when it looks quickly for Show desktop lifting the desktop over it.
+    desktop_watch_until: Option<Instant>,
     /// Staying out but sent away (a full-screen program): when it last looked whether it can
     /// come back.
     come_back_looked: Option<Instant>,
@@ -772,6 +782,8 @@ impl Dock {
             linger_until: None,
             resting: false,
             lowered: false,
+            desktop_news: None,
+            desktop_watch_until: None,
             come_back_looked: None,
             button_up_since: None,
             previewing: false,
@@ -1855,7 +1867,7 @@ impl Dock {
     }
 
     /// Right-click > Hide automatically: on, it slides out of sight as usual; off, it stays out
-    /// the way it was last set to (behind windows, unless Dock settings says on top).
+    /// the way it was last set to (behind windows, unless Dock settings says otherwise).
     fn set_auto_hide(&mut self, auto_hide: bool) -> std::result::Result<(), String> {
         let (store, _) = self.editable()?;
         store.edit(|doc| edit::set_dock(doc, "auto_hide", auto_hide))?;
@@ -2641,7 +2653,7 @@ impl Dock {
             log_info!("newest version {} (this is {})", status.latest, update::shown(update::this_version()));
             return;
         }
-        self.peek();
+        self.peek(false);
         if self.reveal_target < 0.5 {
             self.start_timer(TIMER_UPDATE_TELL, UPDATE_TELL_AGAIN_MS);
             return;
@@ -2658,7 +2670,7 @@ impl Dock {
     /// dock comes out for a few seconds with a line saying how to bring it out, so someone new
     /// sees where it lives. Not over a fullscreen app, nor with nobody there.
     fn welcome(&mut self) {
-        self.peek();
+        self.peek(false);
         if self.reveal_target < 0.5 {
             return;
         }
@@ -2961,7 +2973,7 @@ impl Dock {
         self.push.reset();
         self.linger_until = None;
         self.resting = true;
-        if self.settings.stay_out == StayOut::BehindWindows {
+        if self.settings.stay_out.behind() {
             self.lower();
         }
         if self.previewing {
@@ -2977,27 +2989,60 @@ impl Dock {
     /// menu, coming back after a full-screen program).
     fn lower(&mut self) {
         if let Some(hwnd) = self.hwnd {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
             unsafe {
-                let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
+                // After Show desktop the desktop is over every window: the bottom is under it, out
+                // of sight, so just above it instead (at once, before anything is drawn).
+                if let Some(after) = system::desktop_over(hwnd) {
+                    let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, flags);
+                }
             }
             self.lowered = true;
         }
     }
 
-    /// Over every window again (to be used, or because it no longer stays behind them).
-    fn raise(&mut self) {
+    /// Resting under the windows, and Show desktop has lifted the desktop over them all, the dock
+    /// included (see `system::desktop_over`): the dock comes up just above the desktop, still
+    /// under any window opened or brought back after. True if it did.
+    fn onto_desktop(&mut self) -> bool {
+        let Some(hwnd) = self.hwnd.filter(|_| self.lowered) else { return false };
+        let Some(after) = system::desktop_over(hwnd) else { return false };
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        log_info!("onto the desktop (Show desktop put it in front)");
+        true
+    }
+
+    /// Hears Show desktop lift the desktop while it stays out behind windows, and not otherwise.
+    fn watch_desktop(&mut self) {
+        let wanted = self.stays_out() && self.settings.stay_out.behind();
+        if !wanted {
+            self.desktop_news = None;
+        } else if self.desktop_news.is_none() {
+            self.desktop_news = self.hwnd.and_then(|hwnd| system::DesktopNews::start(hwnd, WM_APP_DESKTOP_NEWS));
+        }
+    }
+
+    /// Over every window again (to be used, or because it no longer stays behind them). The log
+    /// says why, when it was under them.
+    fn raise(&mut self, why: &str) {
         if let Some(hwnd) = self.hwnd {
             unsafe {
                 let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
         if self.lowered {
-            log_info!("over the windows (the pointer rested at the edge)");
+            log_info!("over the windows ({why})");
         }
         self.lowered = false;
         self.resting = false;
         self.edge.reset();
         self.push.reset();
+        // The pointer has been "away" all the while it rested (under windows, it's never over the
+        // dock): counted from now, or it would rest again at once.
+        self.leave.reset();
     }
 
     /// Hiding turned off or on, or the way it stays out changed (dock.toml, Dock settings, the
@@ -3008,23 +3053,30 @@ impl Dock {
                 self.show();
             }
             if self.window_visible {
-                self.raise(); // on top, or brought up to rest behind afresh
+                self.raise("to rest afresh"); // on top, or brought up to rest behind afresh
                 self.rest();
             }
-            log_info!("stays out ({})", if self.settings.stay_out == StayOut::OnTop { "on top of windows" } else { "behind windows" });
+            self.watch_desktop();
+            log_info!(
+                "stays out ({})",
+                match self.settings.stay_out {
+                    StayOut::BehindWindows => "behind windows",
+                    StayOut::AlwaysBehind => "always behind windows",
+                    StayOut::OnTop => "on top of windows",
+                }
+            );
         } else {
             self.stop_timer(TIMER_REST_TIDY);
             if self.window_visible {
-                self.raise();
+                self.raise("hiding automatically again");
                 self.hide(); // it comes out at the edge as usual from now on
             }
             self.resting = false;
+            self.watch_desktop();
             log_info!("hides automatically");
         }
     }
 
-    /// Comes out and stays out for a moment, to show a change made in the settings window.
-    /// Not over a fullscreen app or game, and not while nobody's there.
     /// Registers the keyboard shortcut from the settings (and lets go of an old one). If another
     /// program already has it, the log says so and the dock carries on without one.
     fn apply_hotkey(&mut self) {
@@ -3075,10 +3127,11 @@ impl Dock {
         }
         if self.stays_out() && self.window_visible {
             // Staying out: the shortcut brings it over the windows covering it (until the
-            // pointer has been on it and left, or Esc).
+            // pointer has been on it and left, or Esc). Always behind windows too: the shortcut
+            // is the one way up.
             if self.lowered {
                 system::forget_escape();
-                self.raise();
+                self.raise("the shortcut");
                 self.linger_until = Some(Instant::now() + SUMMON_FOR);
                 self.set_poll(16);
             }
@@ -3096,12 +3149,16 @@ impl Dock {
         self.set_poll(16); // Esc sends it back: see the end of `tick`
     }
 
-    fn peek(&mut self) {
+    /// Comes out for a moment, to show something: a change made in Dock settings, the first
+    /// start's welcome, or a new version. Staying out behind windows, it comes over them to be
+    /// seen; always behind them, only for what Dock settings shows (a new version is then said
+    /// where the dock is). Not over a fullscreen app or game, and not while nobody's there.
+    fn peek(&mut self, from_settings: bool) {
         if self.presence.away() || self.fullscreen_in_front() {
             return;
         }
-        if self.lowered {
-            self.raise(); // staying out behind windows: over them, to be seen
+        if self.lowered && (from_settings || self.settings.stay_out.comes_up_at_edge()) {
+            self.raise("to show a change"); // staying out behind windows: over them, to be seen
         }
         let now = Instant::now();
         if self.linger_until.is_none() {
@@ -3133,7 +3190,7 @@ impl Dock {
         self.previewing = true;
         self.cancel_drag(); // positions are about to change
         self.apply_layout();
-        self.peek();
+        self.peek(true);
         if self.window_visible {
             self.render();
         }
@@ -3539,11 +3596,14 @@ impl Dock {
                 }
             }
             let at_edge = at_edge && !held;
+            // (Always behind windows, sent away by a full-screen program: the pointer doesn't
+            // bring it, over the windows; it comes back under them once that's gone, below.)
+            let always_behind = self.stays_out() && self.settings.stay_out == StayOut::AlwaysBehind;
             // Near an edge shared with a taskbar, it hears the mouse, to tell a push past the
             // edge from a rest on the taskbar (see `wants_out`).
-            self.listen_for_push(near && place.shared());
+            self.listen_for_push(near && place.shared() && !always_behind);
             self.check_pointer_kind(pt, now);
-            if self.wants_out(&place, at_edge, now) && !self.fullscreen_in_front() {
+            if self.wants_out(&place, at_edge, now) && !always_behind && !self.fullscreen_in_front() {
                 self.show();
             }
             // Staying out, but sent away by a full-screen program: back once it's gone.
@@ -3569,20 +3629,35 @@ impl Dock {
             if look && resting {
                 self.come_back_looked = Some(now);
             }
-            if !busy && look && self.fullscreen_in_front() {
+            if self.stays_out() && self.settings.stay_out == StayOut::AlwaysBehind {
+                // Always behind windows, a full-screen program covers it where it is: it stays,
+                // under it, rather than going and coming back. Only if it's over the windows
+                // just then (the shortcut, a change being shown) does it go back under them.
+                if !self.lowered && !busy && self.fullscreen_in_front() {
+                    self.linger_until = None;
+                    self.rest();
+                }
+            } else if !busy && look && self.fullscreen_in_front() {
                 self.hide();
                 return None;
+            }
+            // Resting under the windows, and Show desktop has put the desktop over them all: up
+            // onto the desktop, where it's wanted. (Usually heard at once: see `WM_APP_DESKTOP_NEWS`.)
+            if self.onto_desktop() {
+                self.desktop_watch_until = None;
             }
             // (Under other windows, the pointer is over the dock only where the dock shows.)
             let over = self.layout.pointer_over(&place, pt.x, pt.y) && (!self.lowered || self.hwnd.is_some_and(|hwnd| system::window_under(pt, hwnd)));
             // Staying out behind windows: resting the pointer at the edge brings it over them
-            // (as coming out does; never for a window dragged up there).
-            if self.lowered {
+            // (as coming out does; never for a window dragged up there). Always behind them, the
+            // pointer never does.
+            let comes_up = self.lowered && self.settings.stay_out.comes_up_at_edge();
+            if comes_up {
                 self.listen_for_push(place.shared() && self.layout.near_edge(&place, pt.x, pt.y));
                 self.check_pointer_kind(pt, now);
                 let at_edge = self.layout.at_reveal_edge(&place, pt.x, pt.y) && !system::window_being_moved();
                 if self.wants_out(&place, at_edge, now) {
-                    self.raise();
+                    self.raise("the pointer at the edge");
                 }
             } else {
                 self.listen_for_push(false);
@@ -3631,14 +3706,16 @@ impl Dock {
             // During a drag, and while out for the shortcut, Esc counts: looked for often enough
             // to see a quick tap while it's down (Windows' "was pressed" note isn't reliable).
             // Resting while staying out, it's as quiet as when hidden (quick near the edge,
-            // behind windows, so resting the pointer there is seen on time).
+            // behind windows, so resting the pointer there is seen on time; always behind, the
+            // edge brings nothing, so not there either).
             let near = self.layout.near_edge(&place, pt.x, pt.y);
             self.set_poll(if self.drag.is_some() || lingering {
                 16
             } else if self.group.is_some() {
                 25
             } else if self.stays_out() && self.resting {
-                if self.lowered && near { 16 } else { 100 }
+                let watching = self.desktop_watch_until.is_some_and(|until| now < until);
+                if (comes_up && near) || watching { 16 } else { 100 }
             } else {
                 50
             });
@@ -4011,7 +4088,16 @@ impl Dock {
             }
             WM_APP_PICKED => (done, self.apply_pick().err().map(Action::Error)),
             WM_APP_PEEK => {
-                self.peek();
+                self.peek(true);
+                (done, None)
+            }
+            WM_APP_DESKTOP_NEWS => {
+                // Up onto the desktop now, if Show desktop has lifted it; if not yet, looks quickly
+                // for a moment, in case it's about to.
+                if self.lowered && !self.onto_desktop() {
+                    self.desktop_watch_until = Some(Instant::now() + DESKTOP_WATCH_FOR);
+                    self.set_poll(16);
+                }
                 (done, None)
             }
             WM_APP_PREVIEW => {

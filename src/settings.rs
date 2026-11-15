@@ -694,7 +694,10 @@ fn fixed_texts(window: HWND, pages: &[HWND], page: HWND) {
     combo(IDC_LAUNCH_EFFECT, &[tr!("None"), tr!("Bounce"), tr!("Glow pulse")]);
     combo(IDC_LOOK, &[tr!("Light"), tr!("Dark"), tr!("Glass"), tr!("Frosted"), tr!("Capsule")]);
     combo(IDC_SHOW_LABELS, &[tr!("Never"), tr!("On hover"), tr!("Always")]);
-    combo(IDC_RESTING, &[tr!("Slides out of sight"), tr!("Stays out, behind windows"), tr!("Stays out, on top of windows")]);
+    combo(
+        IDC_RESTING,
+        &[tr!("Slides out of sight"), tr!("Stays out, behind windows"), tr!("Stays out, always behind windows"), tr!("Stays out, on top of windows")],
+    );
     combo(IDC_EDGE, &[tr!("Top"), tr!("Bottom"), tr!("Left"), tr!("Right")]);
     combo(IDC_HOVER_GLOW, &[tr!("None"), tr!("Windows accent colour"), tr!("Each icon's own colour")]);
     combo(IDC_RUN, &[tr!("Normal window"), tr!("Minimised"), tr!("Maximised")]);
@@ -1675,7 +1678,8 @@ impl Settings {
             match (self.dock.auto_hide, self.dock.stay_out) {
                 (true, _) => 0,
                 (false, StayOut::BehindWindows) => 1,
-                (false, StayOut::OnTop) => 2,
+                (false, StayOut::AlwaysBehind) => 2,
+                (false, StayOut::OnTop) => 3,
             },
         );
         pick(
@@ -2164,13 +2168,14 @@ impl Settings {
             }
             (IDC_TASKBAR_SETTINGS, BN_CLICKED) => launch::open(Path::new("ms-settings:taskbar")),
             (IDC_RESTING, CBN_SELCHANGE) => {
-                // Slides out of sight (auto_hide), or stays out behind windows or on top of them.
+                // Slides out of sight (auto_hide), or stays out behind windows, always behind them
+                // or on top of them.
                 let choice = self.control(IDC_RESTING).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 });
                 let not_saved = |e: String| tr!("When you're not using it wasn't saved. {error}", error = e);
                 self.change(tr!("When you're not using it: saved."), not_saved, None, true, |doc| match choice {
-                    1 | 2 => {
+                    1..=3 => {
                         edit::set_dock(doc, "auto_hide", false)?;
-                        edit::set_dock(doc, "stay_out", if choice == 2 { "on-top" } else { "behind-windows" })
+                        edit::set_dock(doc, "stay_out", ["behind-windows", "always-behind", "on-top"][choice as usize - 1])
                     }
                     _ => edit::set_dock(doc, "auto_hide", true),
                 });

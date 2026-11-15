@@ -378,6 +378,7 @@
 "Start with Windows: on." = "「Windows と同時に起動」をオンにしました。"
 "Starting your dock..." = "ドックを起動しています..."
 "Starts Desktop Dock when you sign in (its Start with Windows setting)." = "サインイン時に Desktop Dock を起動します (「Windows と同時に起動」の設定)。"
+"Stays out, always behind windows" = "表示したまま (常にウィンドウの後ろ)"
 "Stays out, behind windows" = "表示したまま (ウィンドウの後ろ)"
 "Stays out, on top of windows" = "表示したまま (ウィンドウの手前)"
 "Style" = "スタイル"

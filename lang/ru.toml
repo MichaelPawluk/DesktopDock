@@ -378,6 +378,7 @@
 "Start with Windows: on." = "Запуск вместе с Windows: включен."
 "Starting your dock..." = "Запуск дока..."
 "Starts Desktop Dock when you sign in (its Start with Windows setting)." = "Запускает Desktop Dock при входе в систему (параметр «Запуск вместе с Windows»)."
+"Stays out, always behind windows" = "Остается на виду, всегда под окнами"
 "Stays out, behind windows" = "Остается на виду, под окнами"
 "Stays out, on top of windows" = "Остается на виду, поверх окон"
 "Style" = "Стиль"

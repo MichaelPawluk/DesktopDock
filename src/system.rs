@@ -4,6 +4,9 @@
 use crate::config::Edge;
 use crate::{log_info, log_warn};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+use windows::Win32::UI::WindowsAndMessaging::{EVENT_OBJECT_REORDER, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WAIT_ABANDONED,
     WAIT_OBJECT_0, WPARAM,
@@ -981,6 +984,82 @@ pub fn fullscreen_in_front(monitor: RECT) -> Option<String> {
 pub fn window_under(point: POINT, window: HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint};
     unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) == window }
+}
+
+/// Show desktop (Win+D, or the far end of the taskbar) lifts the desktop over every ordinary
+/// window and makes it the window in use, so a window resting at the bottom of them, as the dock
+/// does behind windows, ends up under it. While that's so (the desktop in use and above
+/// `window`), the place just above the desktop, as the window to go after: `HWND_TOP` if
+/// nothing is above it. (Only then: a desktop above it for a moment, as when Explorer starts
+/// again, isn't Show desktop.) Usually another window is in use, and the look ends there.
+pub fn desktop_over(window: HWND) -> Option<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::{GW_HWNDNEXT, GW_HWNDPREV, GetWindow, HWND_TOP};
+    unsafe {
+        let desktop = GetForegroundWindow();
+        if desktop.is_invalid() || class_name(desktop) != "Progman" || !IsWindowVisible(desktop).as_bool() {
+            return None;
+        }
+        let mut below = GetWindow(desktop, GW_HWNDNEXT).ok();
+        // (Bounded, in case the windows change order while it looks.)
+        for _ in 0..10_000 {
+            match below {
+                Some(next) if next == window => return Some(GetWindow(desktop, GW_HWNDPREV).unwrap_or(HWND_TOP)),
+                Some(next) => below = GetWindow(next, GW_HWNDNEXT).ok(),
+                None => return None,
+            }
+        }
+        None
+    }
+}
+
+/// Where `DesktopNews` sends its note, and which message it sends.
+static DESKTOP_NEWS_TO: AtomicIsize = AtomicIsize::new(0);
+static DESKTOP_NEWS_MESSAGE: AtomicU32 = AtomicU32::new(0);
+
+/// Hears windows change order while the desktop is the window in use (Show desktop lifting it
+/// over them all, a dock resting behind windows included), so the dock can come up onto it at once
+/// rather than at its next look. Windows posts the news to the dock afterwards (an out-of-context
+/// event hook): nothing waits on the dock, and nothing of another program's is touched. (Show
+/// desktop doesn't say the window in use changed; windows changing order, it does.) Stops when
+/// dropped.
+pub struct DesktopNews(HWINEVENTHOOK);
+
+impl DesktopNews {
+    pub fn start(to: HWND, message: u32) -> Option<DesktopNews> {
+        DESKTOP_NEWS_TO.store(to.0 as isize, Ordering::Relaxed);
+        DESKTOP_NEWS_MESSAGE.store(message, Ordering::Relaxed);
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        let hook = unsafe { SetWinEventHook(EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER, None, Some(desktop_news), 0, 0, flags) };
+        if hook.is_invalid() {
+            log_warn!("can't hear Show desktop at once; the dock looks 10 times a second instead");
+            return None;
+        }
+        Some(DesktopNews(hook))
+    }
+}
+
+impl Drop for DesktopNews {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWinEvent(self.0);
+        }
+    }
+}
+
+unsafe extern "system" fn desktop_news(_hook: HWINEVENTHOOK, _event: u32, window: HWND, _object: i32, _child: i32, _thread: u32, _time: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+    // Only the top-level windows' order, and only while the desktop is in use.
+    unsafe {
+        if window != GetDesktopWindow() || class_name(GetForegroundWindow()) != "Progman" {
+            return;
+        }
+    }
+    let to = HWND(DESKTOP_NEWS_TO.load(Ordering::Relaxed) as *mut c_void);
+    if !to.is_invalid() {
+        unsafe {
+            let _ = PostMessageW(Some(to), DESKTOP_NEWS_MESSAGE.load(Ordering::Relaxed), WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// The top-level windows showing at three spots in the lower half of this monitor (away from

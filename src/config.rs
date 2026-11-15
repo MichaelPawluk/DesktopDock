@@ -59,7 +59,7 @@ pub struct DockSettings {
     /// AutoHide). Off: it stays out, in the way `stay_out` says (right-click > Hide automatically).
     pub auto_hide: bool,
     /// How it stays out when it doesn't hide: behind windows (they cover it; resting the pointer
-    /// at the edge brings it over them) or on top of them.
+    /// at the edge brings it over them), always behind them, or on top of them.
     pub stay_out: StayOut,
     /// The screen edge the dock is on (Settings > Screen): top (the default), bottom, left or right.
     pub edge: Edge,
@@ -94,12 +94,27 @@ pub enum StayOut {
     /// until the pointer leaves (RocketDock's Normal layering with Popup on Mouseover).
     #[default]
     BehindWindows,
+    /// On the desktop, and the pointer never brings it over the windows covering it; only the
+    /// keyboard shortcut does, for a moment (RocketDock's Always on bottom). A full-screen program
+    /// covers it like any window, rather than sending it away.
+    AlwaysBehind,
     /// Over every window (RocketDock's Always on top).
     OnTop,
 }
 
 impl StayOut {
-    pub const NAMES: &[(&str, StayOut)] = &[("behind-windows", StayOut::BehindWindows), ("on-top", StayOut::OnTop)];
+    pub const NAMES: &[(&str, StayOut)] =
+        &[("behind-windows", StayOut::BehindWindows), ("always-behind", StayOut::AlwaysBehind), ("on-top", StayOut::OnTop)];
+
+    /// Rests at the bottom of the windows, so any window covers it.
+    pub fn behind(self) -> bool {
+        matches!(self, StayOut::BehindWindows | StayOut::AlwaysBehind)
+    }
+
+    /// The pointer at the edge brings it over the windows covering it.
+    pub fn comes_up_at_edge(self) -> bool {
+        self == StayOut::BehindWindows
+    }
 }
 
 impl Default for DockSettings {
@@ -793,6 +808,13 @@ icon_opacity = 0");
         let on_top = ok("version = 1\n[dock]\nauto_hide = false\nstay_out = \"on-top\"");
         assert_eq!((on_top.config.dock.auto_hide, on_top.config.dock.stay_out), (false, StayOut::OnTop));
         assert!(on_top.warnings.is_empty(), "{:?}", on_top.warnings);
+        let always = ok("version = 1\n[dock]\nauto_hide = false\nstay_out = \"always-behind\"");
+        assert_eq!((always.config.dock.auto_hide, always.config.dock.stay_out), (false, StayOut::AlwaysBehind));
+        assert!(always.warnings.is_empty(), "{:?}", always.warnings);
+        // Behind windows comes up at the edge; always behind never does; both rest under windows.
+        assert!(StayOut::BehindWindows.behind() && StayOut::BehindWindows.comes_up_at_edge());
+        assert!(StayOut::AlwaysBehind.behind() && !StayOut::AlwaysBehind.comes_up_at_edge());
+        assert!(!StayOut::OnTop.behind());
         let odd = ok("version = 1\n[dock]\nauto_hide = false\nstay_out = \"floating\"");
         assert_eq!((odd.config.dock.auto_hide, odd.config.dock.stay_out), (false, StayOut::BehindWindows));
         assert_eq!(odd.warnings.len(), 1, "{:?}", odd.warnings);
