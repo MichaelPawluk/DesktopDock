@@ -115,8 +115,64 @@ impl ClickGuard {
         true
     }
 
+    /// A click on `item` now would be ignored: it opened less than `WINDOW` ago. Changes nothing.
+    pub fn holds(&self, item: usize, now: Instant) -> bool {
+        self.last.is_some_and(|(last_item, at)| last_item == item && now.duration_since(at) < Self::WINDOW)
+    }
+
     pub fn reset(&mut self) {
         self.last = None;
+    }
+}
+
+/// How close together two presses must be to make a double click: Windows' own double-click
+/// time, and the box around the first press the second must land in (both from the Mouse
+/// settings).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DoubleClickLimits {
+    pub time: Duration,
+    /// The box's width and height, in pixels; the second press may be half of each away.
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Default for DoubleClickLimits {
+    /// Windows' defaults.
+    fn default() -> Self {
+        Self { time: Duration::from_millis(500), width: 4, height: 4 }
+    }
+}
+
+/// Opening with a double click (Dock settings > Behaviour): tells a press that ends a double
+/// click on the same item from one that starts one. `T` says which item: the dock's own, or one
+/// in a group's pop-up.
+#[derive(Debug)]
+pub struct DoubleClick<T> {
+    first: Option<(T, Instant, (i32, i32))>,
+}
+
+impl<T> Default for DoubleClick<T> {
+    fn default() -> Self {
+        Self { first: None }
+    }
+}
+
+impl<T: Copy + PartialEq> DoubleClick<T> {
+    /// A press on `item` at screen point `at`: true if it's the second of a double click (then
+    /// the next press starts afresh), false if it may be the first.
+    pub fn press(&mut self, item: T, at: (i32, i32), now: Instant, limits: DoubleClickLimits) -> bool {
+        let second = self.first.is_some_and(|(first, when, (x, y))| {
+            first == item
+                && now.saturating_duration_since(when) <= limits.time
+                && 2 * (at.0 - x).abs() <= limits.width
+                && 2 * (at.1 - y).abs() <= limits.height
+        });
+        self.first = if second { None } else { Some((item, now, at)) };
+        second
+    }
+
+    pub fn reset(&mut self) {
+        self.first = None;
     }
 }
 
@@ -156,6 +212,74 @@ mod tests {
         assert!(guard.allow(3, t));
         assert!(!guard.allow(3, t + Duration::from_millis(250)));
         assert!(guard.allow(3, t + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn the_guard_says_whether_it_would_hold_a_click_without_counting_it() {
+        let t = Instant::now();
+        let mut guard = ClickGuard::default();
+        assert!(!guard.holds(3, t), "nothing opened yet");
+        assert!(guard.allow(3, t));
+        assert!(guard.holds(3, t + Duration::from_millis(300)));
+        assert!(!guard.holds(4, t + Duration::from_millis(300)), "another icon");
+        assert!(!guard.holds(3, t + Duration::from_millis(500)), "long enough after");
+        assert!(guard.allow(3, t + Duration::from_millis(500)), "asking changed nothing");
+    }
+
+    /// Presses on `item` at (x, y), ms after `start`: which were the second of a double click.
+    fn presses(clicks: &mut DoubleClick<usize>, start: Instant, list: &[(usize, i32, i32, u64)]) -> Vec<bool> {
+        let limits = DoubleClickLimits::default();
+        list.iter().map(|&(item, x, y, ms)| clicks.press(item, (x, y), start + Duration::from_millis(ms), limits)).collect()
+    }
+
+    #[test]
+    fn two_quick_presses_on_one_item_are_a_double_click() {
+        let t = Instant::now();
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 100, 10, 180)]), [false, true]);
+        // As slow as Windows allows (500 ms by default), and the hand moving 2 px each way.
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 1000), (2, 102, 8, 1500)]), [false, true]);
+    }
+
+    #[test]
+    fn too_slow_too_far_or_another_item_is_no_double_click() {
+        let t = Instant::now();
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 100, 10, 501)]), [false, false], "too slow");
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 103, 10, 150)]), [false, false], "3 px across");
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 100, 13, 150)]), [false, false], "3 px down");
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (3, 100, 10, 150)]), [false, false], "another item");
+        // The slow second press starts a new pair: a quick third makes it a double click.
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 100, 10, 800), (2, 100, 10, 950)]), [false, false, true]);
+    }
+
+    #[test]
+    fn after_a_double_click_the_next_press_starts_afresh() {
+        // A triple click: the third press only starts a new pair; a fourth makes another.
+        let t = Instant::now();
+        let mut clicks = DoubleClick::default();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 0), (2, 100, 10, 150), (2, 100, 10, 300), (2, 100, 10, 450)]), [false, true, false, true]);
+        clicks.reset();
+        assert_eq!(presses(&mut clicks, t, &[(2, 100, 10, 600)]), [false], "forgotten");
+    }
+
+    #[test]
+    fn windows_settings_set_the_limits() {
+        let t = Instant::now();
+        let slow = DoubleClickLimits { time: Duration::from_millis(900), width: 10, height: 10 };
+        let mut clicks = DoubleClick::default();
+        assert!(!clicks.press(1, (50, 50), t, slow));
+        assert!(clicks.press(1, (55, 45), t + Duration::from_millis(850), slow), "a slower double-click speed and a bigger box");
+        // Items in a group's pop-up: the group and the item in it.
+        let mut in_group: DoubleClick<(usize, usize)> = DoubleClick::default();
+        let limits = DoubleClickLimits::default();
+        assert!(!in_group.press((4, 0), (10, 10), t, limits));
+        assert!(!in_group.press((4, 1), (10, 10), t + Duration::from_millis(100), limits), "the item beside it");
+        assert!(in_group.press((4, 1), (10, 10), t + Duration::from_millis(200), limits));
     }
 
     #[test]

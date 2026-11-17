@@ -16,7 +16,7 @@
 //!
 //! Built from dialog templates (assets\desktop-dock.rc), so Windows scales them for the display.
 
-use crate::config::{self, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, Kind, LaunchEffect, RunState, StayOut};
+use crate::config::{self, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, Kind, LaunchEffect, Overflow, RunState, StayOut};
 use crate::edit::{self, Spot};
 use crate::home::Home;
 use crate::icons::{self, IconLoader, IconSource, Pixels};
@@ -123,6 +123,7 @@ const IDC_LANGUAGE: i32 = 1317;
 const IDC_LOCKED: i32 = 1411;
 const IDC_STARTUP: i32 = 1412;
 const IDC_RESTING: i32 = 1413;
+const IDC_DOUBLE_CLICK: i32 = 1414;
 const IDC_REMOVED_LIST: i32 = 1501;
 const IDC_PUT_BACK: i32 = 1502;
 const IDC_FORGET: i32 = 1503;
@@ -221,6 +222,7 @@ const IDC_SHORTCUT: i32 = 2103;
 const IDC_SHORTCUT_CLEAR: i32 = 2104;
 const IDC_SHORTCUT_NOTE: i32 = 2105;
 const IDC_EDGE: i32 = 2106;
+const IDC_OVERFLOW: i32 = 2108;
 const IDC_TASKBAR_SETTINGS: i32 = 2107;
 /// The shortcut box (a hotkey control) changed.
 const EN_CHANGE: u32 = 0x0300;
@@ -699,6 +701,8 @@ fn fixed_texts(window: HWND, pages: &[HWND], page: HWND) {
         &[tr!("Slides out of sight"), tr!("Stays out, behind windows"), tr!("Stays out, always behind windows"), tr!("Stays out, on top of windows")],
     );
     combo(IDC_EDGE, &[tr!("Top"), tr!("Bottom"), tr!("Left"), tr!("Right")]);
+    // In Overflow::NAMES' order.
+    combo(IDC_OVERFLOW, &[tr!("Shrink to fit the screen"), tr!("Keep their size, scroll with arrows")]);
     combo(IDC_HOVER_GLOW, &[tr!("None"), tr!("Windows accent colour"), tr!("Each icon's own colour")]);
     combo(IDC_RUN, &[tr!("Normal window"), tr!("Minimised"), tr!("Maximised")]);
     // Windows' own choice first (named in its own language), then each language by its own name.
@@ -1428,6 +1432,10 @@ impl Settings {
                 let index = Edge::NAMES.iter().position(|&(_, e)| e == edge).unwrap_or(0);
                 SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
             }
+            if let Ok(combo) = GetDlgItem(Some(page), IDC_OVERFLOW) {
+                let index = Overflow::NAMES.iter().position(|&(_, o)| o == self.dock.overflow).unwrap_or(0);
+                SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+            }
             if let Ok(button) = GetDlgItem(Some(page), IDC_TASKBAR_SETTINGS) {
                 let _ = ShowWindow(button, if taskbar_there { SW_SHOW } else { SW_HIDE });
             }
@@ -1646,6 +1654,7 @@ impl Settings {
             }
         }
         self.set_check(IDC_LOCKED, self.dock.locked);
+        self.set_check(IDC_DOUBLE_CLICK, self.dock.double_click);
         self.set_check(IDC_STARTUP, crate::startup::starts_with_windows());
         let pick = |id: i32, choice: usize| {
             if let Some(combo) = self.control(id) {
@@ -2166,6 +2175,12 @@ impl Settings {
                 self.change(tr!("Screen edge: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "edge", word));
                 self.fill_screen();
             }
+            (IDC_OVERFLOW, CBN_SELCHANGE) => {
+                let choice = self.control(IDC_OVERFLOW).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 } as usize);
+                let (word, _) = Overflow::NAMES[choice.min(Overflow::NAMES.len() - 1)];
+                let not_saved = |e: String| tr!("When the icons don't fit wasn't saved. {error}", error = e);
+                self.change(tr!("When the icons don't fit: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "overflow", word));
+            }
             (IDC_TASKBAR_SETTINGS, BN_CLICKED) => launch::open(Path::new("ms-settings:taskbar")),
             (IDC_RESTING, CBN_SELCHANGE) => {
                 // Slides out of sight (auto_hide), or stays out behind windows, always behind them
@@ -2184,6 +2199,11 @@ impl Settings {
                 let on = self.checked(IDC_LOCKED);
                 let not_saved = |e: String| tr!("Lock icons wasn't saved. {error}", error = e);
                 self.change(tr!("Lock icons: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "locked", on));
+            }
+            (IDC_DOUBLE_CLICK, BN_CLICKED) => {
+                let on = self.checked(IDC_DOUBLE_CLICK);
+                let not_saved = |e: String| tr!("Open items with a double click wasn't saved. {error}", error = e);
+                self.change(tr!("Open items with a double click: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "double_click", on));
             }
             (IDC_STARTUP, BN_CLICKED) => {
                 // Not in dock.toml: the sign-in task in Task Scheduler (so Revert doesn't undo it).

@@ -154,7 +154,7 @@ BEGIN
   LTEXT           "Sizes are saved when you let go of the slider. The icon you point at is always fully solid.", -1, 0, 237, 365, 9
 END
 
-// Behaviour: timings, Lock icons, Start with Windows, under headings.
+// Behaviour: timings, double click, Lock icons, Start with Windows, under headings.
 104 DIALOGEX 0, 0, 370, 246
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
@@ -175,18 +175,19 @@ BEGIN
   LTEXT           "Zoom time", -1, 0, 88, 84, 10
   CONTROL         "", 1409, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 85, 220, 16
   LTEXT           "", 1410, 310, 88, 60, 10
-  LTEXT           "Editing and startup", 1098, 0, 110, 300, 11
-  AUTOCHECKBOX    "Lock icons", 1411, 90, 125, 200, 12
-  LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 102, 138, 263, 18
-  AUTOCHECKBOX    "Start with Windows", 1412, 90, 159, 200, 12
-  LTEXT           "Show after: how long the pointer rests at the screen's edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 182, 365, 20
-  LTEXT           "When you're not using it", 1098, 0, 206, 300, 11
-  LTEXT           "The dock", -1, 0, 223, 84, 10
-  COMBOBOX        1413, 90, 221, 160, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Show after: how long the pointer rests at the screen's edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 104, 365, 20
+  LTEXT           "Clicking, editing and startup", 1098, 0, 130, 300, 11
+  AUTOCHECKBOX    "Open items with a double click", 1414, 90, 145, 200, 12
+  AUTOCHECKBOX    "Lock icons", 1411, 90, 160, 200, 12
+  LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 102, 173, 263, 18
+  AUTOCHECKBOX    "Start with Windows", 1412, 90, 194, 200, 12
+  LTEXT           "When you're not using it", 1098, 0, 213, 300, 11
+  LTEXT           "The dock", -1, 0, 230, 84, 10
+  COMBOBOX        1413, 90, 228, 160, 60, CBS_DROPDOWNLIST | WS_TABSTOP
 END
 
-// Screen: which screen the dock is on, what to know about its top edge, and a keyboard
-// shortcut that brings the dock out.
+// Screen: which screen the dock is on, what to know about its top edge, what happens when the
+// icons don't fit along it, and a keyboard shortcut that brings the dock out.
 112 DIALOGEX 0, 0, 370, 246
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
@@ -198,12 +199,16 @@ BEGIN
   COMBOBOX        2106, 90, 32, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
   PUSHBUTTON      "Taskbar settings...", 2107, 186, 31, 90, 14
   LTEXT           "", 2102, 90, 50, 275, 30
-  LTEXT           "Keyboard shortcut", 1098, 0, 86, 300, 11
-  LTEXT           "Show the dock with", -1, 0, 103, 84, 10
-  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 101, 140, 12
-  PUSHBUTTON      "Clear", 2104, 236, 100, 50, 14
-  LTEXT           "", 2105, 90, 118, 275, 20
-  LTEXT           "Press the shortcut again, or Esc, to send the dock back. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 140, 365, 20
+  LTEXT           "When the icons don't fit", 1098, 0, 86, 300, 11
+  LTEXT           "The icons", -1, 0, 103, 84, 10
+  COMBOBOX        2108, 90, 100, 200, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Scrolling: the arrows at the ends of the dock move along, and so does the mouse wheel.", -1, 90, 117, 275, 18
+  LTEXT           "Keyboard shortcut", 1098, 0, 142, 300, 11
+  LTEXT           "Show the dock with", -1, 0, 159, 84, 10
+  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 157, 140, 12
+  PUSHBUTTON      "Clear", 2104, 236, 156, 50, 14
+  LTEXT           "", 2105, 90, 174, 275, 20
+  LTEXT           "Press the shortcut again, or Esc, to send the dock back. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 196, 365, 20
 END
 
 // Recently removed: the last 20 items taken off the dock; put one back, or forget them.

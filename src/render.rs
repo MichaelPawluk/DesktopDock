@@ -8,14 +8,15 @@ use std::ffi::c_void;
 use std::path::Path;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_PROPERTIES, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
-    ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory,
+    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
+    ID2D1Bitmap, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory, ID2D1PathGeometry, ID2D1StrokeStyle,
 };
+use windows_numerics::Vector2;
 use windows::Win32::Graphics::DirectWrite::{DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -90,7 +91,9 @@ impl Drop for Surface {
 pub struct Renderer {
     pub rt: ID2D1DCRenderTarget,
     pub dwrite: IDWriteFactory,
-    _factory: ID2D1Factory,
+    factory: ID2D1Factory,
+    /// Lines with round ends and corners (see `polyline`).
+    round: Option<ID2D1StrokeStyle>,
     surface: Option<Surface>,
     /// The dragged icon's own small buffer (see `begin_drag_image`).
     drag_surface: Option<Surface>,
@@ -113,8 +116,43 @@ impl Renderer {
             let rt = factory.CreateDCRenderTarget(&props)?;
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let dwrite = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            Ok(Self { rt, dwrite, _factory: factory, surface: None, drag_surface: None, popup_surface: None })
+            let round = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 1.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            };
+            let round = factory.CreateStrokeStyle(&round, None).ok();
+            Ok(Self { rt, dwrite, factory, round, surface: None, drag_surface: None, popup_surface: None })
         }
+    }
+
+    /// A line through `points`, made once (when the layout changes) and drawn with `stroke` as
+    /// often as needed: a shape made anew for every frame is memory churn for the software
+    /// renderer.
+    pub fn polyline(&self, points: &[Vector2]) -> Option<ID2D1PathGeometry> {
+        let (first, rest) = points.split_first()?;
+        unsafe {
+            let path = self.factory.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
+            sink.BeginFigure(*first, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddLines(rest);
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close().ok()?;
+            Some(path)
+        }
+    }
+
+    /// Draws a `polyline`, `width` wide, with round ends and corners. One stroke, so a
+    /// see-through colour stays even where its segments meet.
+    pub fn stroke<P>(&self, line: &ID2D1PathGeometry, brush: P, width: f32)
+    where
+        P: windows_core::Param<ID2D1Brush>,
+    {
+        unsafe { self.rt.DrawGeometry(line, brush, width, self.round.as_ref()) }
     }
 
     pub fn bitmap(&self, pixels: &Pixels) -> Result<ID2D1Bitmap> {

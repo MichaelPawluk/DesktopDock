@@ -598,6 +598,24 @@ pub fn cursor_pos() -> Option<POINT> {
     unsafe { GetCursorPos(&mut pt).ok().map(|_| pt) }
 }
 
+/// Windows' own double click (Mouse settings > Double-click speed): how soon, and how near the
+/// first press the second must come, in pixels at `dpi`.
+pub fn double_click(dpi: u32) -> crate::motion::DoubleClickLimits {
+    use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+    use windows::Win32::UI::WindowsAndMessaging::{SM_CXDOUBLECLK, SM_CYDOUBLECLK};
+    let usual = crate::motion::DoubleClickLimits::default();
+    unsafe {
+        let ms = GetDoubleClickTime();
+        let (width, height) = (GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi), GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi));
+        crate::motion::DoubleClickLimits {
+            time: if ms > 0 { std::time::Duration::from_millis(ms.into()) } else { usual.time },
+            width: if width > 0 { width } else { usual.width },
+            height: if height > 0 { height } else { usual.height },
+        }
+    }
+}
+
 /// A window is being dragged by its title bar or resized, for example toward Snap at the top
 /// edge. Windows reports this reliably, while file and text drags don't set it.
 pub fn window_being_moved() -> bool {

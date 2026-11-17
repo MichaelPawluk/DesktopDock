@@ -38,6 +38,9 @@ pub struct DockSettings {
     pub launch_effect: LaunchEffect,
     /// Icons can't be dragged around or off the dock (right-click → Lock icons).
     pub locked: bool,
+    /// An item opens with a double click, not one click (Dock settings > Behaviour). A group
+    /// still opens with one click; the items in it need a double click too.
+    pub double_click: bool,
     /// The dock's panel: light (CrystalXP-style, the default) or dark. Used by the classic style.
     pub look: DockLook,
     /// The panel's style: classic (the light or dark panel of `look`, the default), glass,
@@ -63,6 +66,9 @@ pub struct DockSettings {
     pub stay_out: StayOut,
     /// The screen edge the dock is on (Settings > Screen): top (the default), bottom, left or right.
     pub edge: Edge,
+    /// When the icons at their size don't fit along the screen (Settings > Screen): they shrink
+    /// until they do (the default), or keep their size and scroll, with arrows at the dock's ends.
+    pub overflow: Overflow,
     /// The language the dock speaks (Dock settings > Look > Language): "auto" (the default) for
     /// Windows' own display language, or one of `text::LANGUAGES`' codes ("de", "pt-BR").
     pub language: String,
@@ -85,6 +91,21 @@ impl Edge {
     pub fn is_side(self) -> bool {
         matches!(self, Edge::Left | Edge::Right)
     }
+}
+
+/// What the dock does when its icons don't fit along the screen (see `DockSettings::overflow`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Overflow {
+    /// Icons, gaps and padding shrink together until the dock fits (like RocketDock).
+    #[default]
+    Shrink,
+    /// Icons keep their size; the dock reaches across the screen with an arrow at each end, and
+    /// the icons scroll between them.
+    Scroll,
+}
+
+impl Overflow {
+    pub const NAMES: &[(&str, Overflow)] = &[("shrink", Overflow::Shrink), ("scroll", Overflow::Scroll)];
 }
 
 /// How the dock stays out when it doesn't hide (see `DockSettings::stay_out`).
@@ -135,6 +156,7 @@ impl Default for DockSettings {
             icon_opacity: 100,
             launch_effect: LaunchEffect::Bounce,
             locked: false,
+            double_click: false,
             look: DockLook::Light,
             style: DockStyle::Classic,
             hover_glow: HoverGlow::None,
@@ -144,6 +166,7 @@ impl Default for DockSettings {
             auto_hide: true,
             stay_out: StayOut::BehindWindows,
             edge: Edge::Top,
+            overflow: Overflow::Shrink,
             language: "auto".into(),
         }
     }
@@ -322,6 +345,7 @@ struct RawDock {
     icon_opacity: Option<u32>,
     launch_effect: Option<LaunchEffect>,
     locked: Option<bool>,
+    double_click: Option<bool>,
     look: Option<String>,
     style: Option<String>,
     hover_glow: Option<HoverGlow>,
@@ -331,6 +355,7 @@ struct RawDock {
     auto_hide: Option<bool>,
     stay_out: Option<String>,
     edge: Option<String>,
+    overflow: Option<String>,
     language: Option<String>,
     /// Version 0: zoom as a multiple of icon_size.
     hover_scale: Option<f32>,
@@ -340,8 +365,8 @@ const ROOT_KEYS: &[&str] = &["version", "dock", "item"];
 pub(crate) const DOCK_KEYS: &[&str] = &[
     "icon_size", "zoom_size", "zoom_ms", "spacing", "popup_delay_ms", "hide_delay_ms",
     "slide_in_ms", "slide_out_ms", "show_labels", "always_show_labels", "label_size", "background_opacity", "icon_opacity",
-    "launch_effect", "locked", "look", "style", "hover_glow", "monitor", "hotkey", "check_updates", "auto_hide", "stay_out",
-    "edge", "language", "hover_scale",
+    "launch_effect", "locked", "double_click", "look", "style", "hover_glow", "monitor", "hotkey", "check_updates", "auto_hide", "stay_out",
+    "edge", "overflow", "language", "hover_scale",
 ];
 pub(crate) const ITEM_KEYS: &[&str] = &[
     "kind", "name", "target", "app_id", "args", "start_in", "icon", "run", "admin", "items", "separator",
@@ -432,6 +457,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         icon_opacity,
         launch_effect: r.launch_effect.unwrap_or(d.launch_effect),
         locked: r.locked.unwrap_or(d.locked),
+        double_click: r.double_click.unwrap_or(d.double_click),
         look: choice("look", r.look.as_deref(), DockLook::NAMES, d.look, &mut warnings),
         style: choice("style", r.style.as_deref(), DockStyle::NAMES, d.style, &mut warnings),
         hover_glow: r.hover_glow.unwrap_or(d.hover_glow),
@@ -448,6 +474,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         auto_hide: r.auto_hide.unwrap_or(d.auto_hide),
         stay_out: choice("stay_out", r.stay_out.as_deref(), StayOut::NAMES, d.stay_out, &mut warnings),
         edge: choice("edge", r.edge.as_deref(), Edge::NAMES, d.edge, &mut warnings),
+        overflow: choice("overflow", r.overflow.as_deref(), Overflow::NAMES, d.overflow, &mut warnings),
         language: match r.language.as_deref().map(str::trim) {
             None | Some("") => d.language,
             Some(word) if word.eq_ignore_ascii_case("auto") => d.language,
@@ -641,6 +668,25 @@ target = 'C:\Discord\Update.exe'
             assert!(example.contains(&format!("
 {key} =")), "the example shows the item key {key}");
         }
+    }
+
+    #[test]
+    fn icons_shrink_to_fit_unless_scrolling_is_chosen() {
+        assert_eq!(ok("").config.dock.overflow, Overflow::Shrink, "as always");
+        let parsed = ok("version = 1\n[dock]\noverflow = \"scroll\"");
+        assert_eq!(parsed.config.dock.overflow, Overflow::Scroll);
+        assert!(parsed.warnings.is_empty(), "a known setting: {:?}", parsed.warnings);
+        let odd = ok("version = 1\n[dock]\noverflow = \"wrap\"");
+        assert_eq!(odd.config.dock.overflow, Overflow::Shrink, "a word it doesn't know: the default");
+        assert!(odd.warnings.iter().any(|w| w.contains("overflow")), "{:?}", odd.warnings);
+    }
+
+    #[test]
+    fn double_click_is_off_unless_chosen() {
+        assert!(!ok("").config.dock.double_click, "one click opens, as always");
+        let parsed = ok("version = 1\n[dock]\ndouble_click = true");
+        assert!(parsed.config.dock.double_click);
+        assert!(parsed.warnings.is_empty(), "a known setting: {:?}", parsed.warnings);
     }
 
     #[test]

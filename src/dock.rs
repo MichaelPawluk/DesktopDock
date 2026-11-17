@@ -11,7 +11,7 @@ use crate::hotkey;
 use crate::home::Home;
 use crate::icons::{self, IconLoader, IconSource, IconWorker, Job, Part};
 use crate::layout::{self, DragZone, Layout};
-use crate::motion::{self, ClickGuard, Dwell, Push};
+use crate::motion::{self, ClickGuard, DoubleClick, Dwell, Push};
 use crate::render::Renderer;
 use crate::drop;
 use crate::pickers::{self, Pick};
@@ -36,8 +36,8 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    D2D1_OPACITY_MASK_CONTENT_GRAPHICS, D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1LinearGradientBrush, ID2D1PathGeometry,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
@@ -65,7 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_SHOWWINDOW, SetCoalescableTimer, SetCursorPos, SetLayeredWindowAttributes, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenuEx,
     TranslateMessage, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_CAPTURECHANGED, WM_HOTKEY, WM_INPUT, WM_MOUSEACTIVATE, WM_MOUSEFIRST, WM_MOUSELAST, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WM_CAPTURECHANGED, WM_HOTKEY, WM_INPUT, WM_MOUSEACTIVATE, WM_MOUSEFIRST, WM_MOUSEHWHEEL, WM_MOUSELAST, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     MF_GRAYED, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{Error, HSTRING, PCWSTR, Result, w};
@@ -95,6 +95,20 @@ const TIMER_UPDATE_TELL: usize = 10;
 /// free space, as when it hides (Windows keeps the picture on screen).
 const TIMER_REST_TIDY: usize = 11;
 const REST_TIDY_MS: u32 = 2000;
+/// One-shot: opening with a double click, one click has had its double-click time with no second
+/// press: the item says how to open it, in place of its name.
+const TIMER_LONE_CLICK: usize = 12;
+/// Scrolling: how long the icons take to glide to where an arrow or the wheel sends them.
+const SCROLL_GLIDE: Duration = Duration::from_millis(200);
+/// Scrolling: how long an arrow's glow takes to come up under the pointer, and to fade once
+/// the pointer leaves (ms).
+const ARROW_GLOW_IN: u64 = 120;
+const ARROW_GLOW_OUT: u64 = 260;
+/// One notch of the mouse wheel, as Windows counts it (WHEEL_DELTA).
+const WHEEL_NOTCH: i32 = 120;
+/// A drag held on an arrow moves the icons one along this often (the first time after this long,
+/// so passing over an arrow scrolls nothing).
+const DRAG_SCROLL_EVERY: Duration = Duration::from_millis(400);
 /// On a side, the space between the icons and their names (in pixels at 100%).
 const SIDE_TEXT_GAP: f32 = 8.0;
 /// Staying out but sent away by a full-screen program: how often it looks whether it can come back.
@@ -135,6 +149,8 @@ const STRIP_FOR: Duration = Duration::from_secs(6);
 const LOCKED_NOTICE: &str = n!("Icons are locked (right-click > Lock icons to unlock)");
 /// Shown when one of the dock's own icons is dragged while locked.
 const LOCKED_ICON_NOTICE: &str = n!("Icons are locked (hold Ctrl to move one, or right-click > Lock icons to unlock)");
+/// Shown in place of an item's name after one click on it, when items open with a double click.
+const DOUBLE_CLICK_HINT: &str = n!("Double-click to open");
 /// After a drop into a group's pop-up it stays this long, so you see where the icon landed...
 const SETTLE_HOLD: Duration = Duration::from_millis(600);
 /// ...and a closing pop-up fades out over this long (at once with Windows' animations off).
@@ -394,6 +410,11 @@ pub struct Dock {
     renderer: Renderer,
     brush: ID2D1SolidColorBrush,
     fill: Option<ID2D1LinearGradientBrush>,
+    /// Scrolling: each arrow's glow at full strength (back, then forward), made with the layout;
+    /// a frame only sets how strong it shows.
+    arrow_glows: [Option<ID2D1LinearGradientBrush>; 2],
+    /// Scrolling: each arrow's chevron (back, then forward), made with the layout.
+    chevrons: [Option<ID2D1PathGeometry>; 2],
     /// The panel's colours, edge and corners for the style in use (see `skin`).
     skin: Skin,
     /// Windows' apps set to dark, as last seen (the capsule style follows it).
@@ -428,6 +449,33 @@ pub struct Dock {
     hovered: Option<usize>,
     pressed: Option<usize>,
     clicks: ClickGuard,
+    /// Opening with a double click: the presses on the dock's items and on those in a group's
+    /// pop-up.
+    double: DoubleClick<Pressed>,
+    /// The press under way is the second of a double click: letting go on the item opens it.
+    second_press: bool,
+    /// One click on this item opened nothing; waiting out the double-click time for a second.
+    lone_click: Option<Pressed>,
+    /// The item that says "Double-click to open" in place of its name, while the pointer stays on it.
+    hint: Option<Pressed>,
+    /// Scrolling (the icons don't fit and Screen > When the icons don't fit says scroll): how far
+    /// along they're going, and how far they're drawn now, gliding there from `scroll_from`
+    /// since `scroll_since`, and where they showed then (window x from and to; see
+    /// `scroll_span`).
+    scroll_target: f32,
+    scroll_shown: f32,
+    scroll_from: f32,
+    scroll_since: Option<Instant>,
+    scroll_span_from: (f32, f32),
+    /// The arrow under the pointer (lit), and the one pressed (it scrolls when let go on).
+    arrow_hovered: Option<layout::Arrow>,
+    arrow_pressed: Option<layout::Arrow>,
+    /// How far each arrow's glow is up (back, forward): 1 lit, 0 none.
+    arrow_glow: [f32; 2],
+    /// The mouse wheel's turning not used yet (Windows counts 120 to a notch).
+    wheel_rest: i32,
+    /// A drag held on an arrow: since when, or when it last moved the icons along.
+    drag_scrolled: Option<(layout::Arrow, Instant)>,
     tracking_mouse: bool,
     /// Pointer resting at the screen edge (popup delay).
     edge: Dwell,
@@ -585,6 +633,40 @@ pub struct Dock {
     /// A closed group's pop-up still on screen, fading out: since when, how long it holds first,
     /// and where it is.
     popup_fading: Option<(Instant, Duration, i32, i32)>,
+}
+
+/// An item as far as telling one from another goes (see `changed_item`).
+type ItemKey = (Kind, String, String, String, usize);
+
+fn item_key(cfg: &ItemConfig) -> ItemKey {
+    (cfg.kind, cfg.name.clone(), cfg.target.clone(), cfg.app_id.clone(), cfg.items.len())
+}
+
+/// The item that changed between two versions of the dock, to bring into view: one added (put
+/// back, undone, dropped in) where it went, one moved where it went, or the first that differs.
+/// None when nothing did, or when the dock only lost items.
+fn changed_item(before: &[ItemKey], after: &[ItemKey]) -> Option<usize> {
+    if after.len() < before.len() {
+        return None;
+    }
+    let first = (0..after.len()).find(|&i| before.get(i) != Some(&after[i]))?;
+    if after.len() == before.len() {
+        // One item moved: it's at one end of the stretch that changed, and the item at the
+        // other end was there before.
+        let last = (0..after.len()).rev().find(|&i| before[i] != after[i]).unwrap_or(first);
+        if after[last] == before[first] && after[first] != before[last] {
+            return Some(last);
+        }
+    }
+    Some(first)
+}
+
+/// What a press of the left button landed on, for opening with a double click: an item on the
+/// dock, or one in a group's pop-up (the group, the item in it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pressed {
+    Item(usize),
+    Child(usize, usize),
 }
 
 /// An open group: which, where its pop-up is, and what the pointer is doing on it.
@@ -750,6 +832,8 @@ impl Dock {
             renderer,
             brush,
             fill: None,
+            arrow_glows: [None, None],
+            chevrons: [None, None],
             skin: skin::skin(DockStyle::Classic, DockLook::Light, false),
             windows_dark: chrome::windows_is_dark(),
             names: None,
@@ -769,6 +853,20 @@ impl Dock {
             hovered: None,
             pressed: None,
             clicks: ClickGuard::default(),
+            double: DoubleClick::default(),
+            second_press: false,
+            lone_click: None,
+            hint: None,
+            scroll_target: 0.0,
+            scroll_shown: 0.0,
+            scroll_from: 0.0,
+            scroll_span_from: (0.0, 0.0),
+            scroll_since: None,
+            arrow_hovered: None,
+            arrow_glow: [0.0; 2],
+            arrow_pressed: None,
+            wheel_rest: 0,
+            drag_scrolled: None,
             tracking_mouse: false,
             edge: Dwell::default(),
             push: Push::default(),
@@ -920,10 +1018,21 @@ impl Dock {
         let (from, to) = if edge.is_side() { (screen.work.top, screen.work.bottom) } else { (screen.work.left, screen.work.right) };
         self.screen = screen;
         let separators: Vec<bool> = self.items.iter().map(|item| item.cfg.is_separator()).collect();
-        // Shrink to fit the screen, keeping a small margin at each end.
+        // Shrink to fit the screen (or scroll), keeping a small margin at each end.
         let margin = (8.0 * dpi as f32 / 96.0).round();
         let max_width = (to - from) as f32 - 2.0 * margin;
+        let was = (self.layout.geo.edge, self.layout.geo.icon, self.layout.geo.scale, self.layout.geo.panel_w);
         self.layout = layout::compute(&self.settings, &separators, dpi, Some(max_width));
+        // Scrolling, the icons stay where they were left (at rest, within what there is now), unless
+        // the dock moved to another edge or screen or its icons changed size: then from the start.
+        let g = self.layout.geo;
+        if (g.edge, g.icon, g.scale, g.panel_w) != was {
+            self.scroll_target = 0.0;
+        }
+        self.scroll_target = self.layout.settled(self.scroll_target);
+        self.scroll_shown = self.scroll_target;
+        self.scroll_since = None;
+        self.layout.set_offset(self.scroll_shown);
         self.win_x = self.layout.window_x(from, to);
         let g = self.layout.geo;
 
@@ -1012,6 +1121,51 @@ impl Dock {
                     )
                 })
                 .ok();
+
+            // Scrolling: the arrows' glows and chevrons, made here once rather than for every
+            // frame (see `draw`).
+            self.arrow_glows = [None, None];
+            self.chevrons = [None, None];
+            if let Some(s) = self.layout.scroll {
+                let frame = g.frame();
+                let arrows = [layout::Arrow::Back, layout::Arrow::Forward];
+                // An arrow's end of the panel, brightest at the end and fading out smoothly toward
+                // the icons, in the separators' colour.
+                let Rgba(r, gr, b, a) = self.skin.divider;
+                let peak = (a * 1.6).min(0.55);
+                let (left, right) = (g.panel_left, g.panel_left + g.panel_w);
+                let cv = (g.panel_top + g.panel_h) / 2.0;
+                let reach = s.view_start - g.panel_left + g.icon * 0.6;
+                // Level at the end, easing away to nothing: no edge anywhere.
+                let stops = [0.0f32, 0.2, 0.4, 0.6, 0.8, 1.0].map(|p| D2D1_GRADIENT_STOP { position: p, color: rgba(r, gr, b, peak * (1.0 - p * p * (3.0 - 2.0 * p))) });
+                if let Ok(collection) = rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
+                    for (glow, arrow) in self.arrow_glows.iter_mut().zip(arrows) {
+                        let (outer, inner) = match arrow {
+                            layout::Arrow::Back => (left, left + reach),
+                            layout::Arrow::Forward => (right, right - reach),
+                        };
+                        let (start_x, start_y, _, _) = frame.rect(outer, cv, outer, cv);
+                        let (end_x, end_y, _, _) = frame.rect(inner, cv, inner, cv);
+                        let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: start_x, Y: start_y }, endPoint: Vector2 { X: end_x, Y: end_y } };
+                        *glow = rt.CreateLinearGradientBrush(&line, None, &collection).ok();
+                    }
+                }
+                // A chevron at each end (‹ › along the dock, up and down on a side).
+                let inset = (4.0 * g.scale).round();
+                let cv = g.pad_top + g.icon / 2.0;
+                let tall = (g.icon * 0.8).min(g.panel_h - g.panel_top - 2.0 * inset);
+                let half = (g.icon * 0.12).max(5.0 * g.scale).min(tall * 0.3);
+                let point = |u: f32, v: f32| {
+                    let (x, y, _, _) = frame.rect(u, v, u, v);
+                    Vector2 { X: x, Y: y }
+                };
+                for (chevron, arrow) in self.chevrons.iter_mut().zip(arrows) {
+                    let Some((from, to)) = self.layout.arrow_span(arrow) else { continue };
+                    let cu = (from + to) / 2.0;
+                    let reach = half * 0.5 * if arrow == layout::Arrow::Back { -1.0 } else { 1.0 };
+                    *chevron = self.renderer.polyline(&[point(cu - reach, cv - half), point(cu + reach, cv), point(cu - reach, cv + half)]);
+                }
+            }
         }
     }
 
@@ -1463,14 +1617,16 @@ impl Dock {
             .map(|(index, item)| {
                 let cfg = &item.cfg;
                 // Its icon, and its whole slot (the gaps either side count as it too).
-                let place = self.layout.slots.iter().find(|slot| slot.item == index).map_or(r#""rect":null,"slot":null"#.to_string(), |slot| {
+                let place = self.layout.slots.iter().find(|slot| slot.item == index).map_or(r#""rect":null,"slot":null,"in_view":false"#.to_string(), |slot| {
                     let (left, centre) = (g.origin + slot.left, slot.center(&g));
                     let half = if slot.separator { slot.width / 2.0 } else { g.icon / 2.0 };
                     let (icon_top, icon_bottom) = (g.pad_top, g.pad_top + g.icon);
                     format!(
-                        r#""rect":{},"slot":{}"#,
+                        r#""rect":{},"slot":{},"in_view":{}"#,
                         out_rect(centre - half, icon_top, centre + half, icon_bottom),
-                        out_rect(left, icon_top, left + slot.width, icon_bottom)
+                        out_rect(left, icon_top, left + slot.width, icon_bottom),
+                        // (Scrolling: it shows whole between the arrows.)
+                        self.layout.shown_part(centre - half, centre + half) > 0.999,
                     )
                 });
                 let children: Vec<String> = item
@@ -1539,6 +1695,26 @@ impl Dock {
                 drag.gap.is_none() && drag.into.is_none() && drag.in_popup.is_none()
             )
         });
+        // Scrolling: how far along (from 0 to max), the items showing whole, and where each arrow
+        // is on the screen and whether it can go on.
+        let scroll = self.layout.scroll.map_or("null".to_string(), |scroll| {
+            let shown = self.layout.whole_in_view();
+            let arrow = |arrow: layout::Arrow| {
+                self.layout.arrow_span(arrow).map_or("null".to_string(), |(from, to)| {
+                    format!(r#"{{"rect":{},"live":{},"lit":{}}}"#, out_rect(from, g.panel_top, to, g.panel_h), self.layout.can_scroll(arrow, self.scroll_target), self.arrow_hovered == Some(arrow))
+                })
+            };
+            format!(
+                r#"{{"offset":{:.1},"target":{:.1},"max":{:.1},"first":{},"last":{},"back":{},"forward":{}}}"#,
+                scroll.offset,
+                self.scroll_target,
+                scroll.max_offset(),
+                json_index(shown.first().copied()),
+                json_index(shown.last().copied()),
+                arrow(layout::Arrow::Back),
+                arrow(layout::Arrow::Forward),
+            )
+        });
         let strip = self.strip.as_ref().map_or("null".to_string(), |strip| {
             let on_screen = |r: &D2D_RECT_F| json_rect(out_x + r.left, out_y + r.top, out_x + r.right, out_y + r.bottom);
             format!(
@@ -1551,11 +1727,11 @@ impl Dock {
         format!(
             concat!(
                 r#"{{"window":{{"rect":{},"visible":{},"reveal":{:.3},"reveal_target":{:.3}}},"#,
-                r#""mode":"{:?}","safe_mode":{},"locked":{},"bin_full":{},"menu_open":{},"dragging":{},"picking":{},"hovered":{},"#,
+                r#""mode":"{:?}","safe_mode":{},"locked":{},"bin_full":{},"menu_open":{},"dragging":{},"picking":{},"hovered":{},"hint":{},"#,
                 r#""hotkey":{},"hotkey_registered":{},"screen":{{"id":{},"number":{},"main":{},"dpi":{}}},"#,
-                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"always_show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","style":"{:?}","hover_glow":"{:?}","monitor":{},"auto_hide":{},"stay_out":"{:?}","edge":"{:?}"}},"resting":{},"lowered":{},"poll_ms":{},"reveal_point":{{"x":{},"y":{}}},"push":{{"shared":{},"listening":{},"pointer_pushes":{}}},"#,
+                r#""settings":{{"icon_size":{},"zoom_size":{},"zoom_ms":{},"spacing":{},"popup_delay_ms":{},"hide_delay_ms":{},"slide_in_ms":{},"slide_out_ms":{},"show_labels":{},"always_show_labels":{},"label_size":{},"background_opacity":{},"icon_opacity":{},"launch_effect":"{:?}","look":"{:?}","style":"{:?}","hover_glow":"{:?}","monitor":{},"auto_hide":{},"stay_out":"{:?}","edge":"{:?}","double_click":{},"overflow":"{:?}"}},"resting":{},"lowered":{},"poll_ms":{},"reveal_point":{{"x":{},"y":{}}},"push":{{"shared":{},"listening":{},"pointer_pushes":{}}},"#,
                 r#""pixels":{{"scale":{},"icon":{},"zoom":{},"gap":{},"panel":{},"panel_top":{},"radius":{}}},"windows_dark":{},"#,
-                r#""undo":{},"strip":{},"drag":{},"group":{},"items":[{}]}}"#,
+                r#""undo":{},"strip":{},"drag":{},"group":{},"scroll":{},"items":[{}]}}"#,
             ),
             json_rect(window.left as f32, window.top as f32, window.right as f32, window.bottom as f32),
             self.window_visible,
@@ -1569,6 +1745,12 @@ impl Dock {
             self.drag.is_some(),
             self.picking,
             json_index(self.hovered),
+            // The item that says "Double-click to open" in place of its name (with the text shown).
+            match self.hint {
+                Some(Pressed::Item(index)) => format!(r#"{{"item":{index},"child":null,"text":{}}}"#, json_text(crate::text::t(DOUBLE_CLICK_HINT))),
+                Some(Pressed::Child(group, k)) => format!(r#"{{"item":{group},"child":{k},"text":{}}}"#, json_text(crate::text::t(DOUBLE_CLICK_HINT))),
+                None => "null".to_string(),
+            },
             json_text(&s.hotkey),
             self.hotkey.is_some(),
             json_text(&self.screen.id),
@@ -1596,6 +1778,8 @@ impl Dock {
             s.auto_hide,
             s.stay_out,
             s.edge,
+            s.double_click,
+            s.overflow,
             self.resting,
             self.lowered,
             self.poll_ms,
@@ -1616,6 +1800,7 @@ impl Dock {
             strip,
             drag,
             group,
+            scroll,
             items.join(","),
         )
     }
@@ -1728,12 +1913,25 @@ impl Dock {
         if self.settings.check_updates != checking_was {
             self.schedule_update_check(true);
         }
+        let before: Vec<ItemKey> = self.items.iter().map(|item| item_key(&item.cfg)).collect();
         self.items = config.items.into_iter().map(Item::new).collect();
+        let changed = changed_item(&before, &self.items.iter().map(|item| item_key(&item.cfg)).collect::<Vec<_>>());
         self.hovered = None;
         self.pressed = None;
         self.clicks.reset();
+        // The items may have moved: a press before this never pairs with one after it.
+        self.double.reset();
+        self.second_press = false;
+        self.lone_click = None;
+        self.hint = None;
+        self.stop_timer(TIMER_LONE_CLICK);
         self.missing.clear();
         self.relayout_keeping(previous);
+        // Scrolling: what was just added, put back, undone or moved comes into view.
+        if let Some(index) = changed.filter(|_| self.layout.scroll.is_some() && !before.is_empty()) {
+            let target = self.layout.showing(index, self.scroll_target);
+            self.scroll_to(target, "a change on the dock");
+        }
         if self.window_visible {
             self.render(); // when hidden, the next reveal draws it
         }
@@ -1919,6 +2117,7 @@ impl Dock {
         });
         self.hovered = None;
         self.pressed = None;
+        self.drag_scrolled = None;
         system::forget_escape(); // only an Esc from now on cancels it
         self.render(); // its place shows empty
         self.update_drag();
@@ -1933,6 +2132,7 @@ impl Dock {
         }
         let Some(pt) = system::cursor_pos() else { return };
         let (x, y) = self.from_screen(pt.x, pt.y);
+        self.drag_scroll(x, y);
         let Some((index, child)) = self.drag.as_ref().map(|drag| (drag.index, drag.child)) else { return };
         let now = Instant::now();
         // A whole group never goes inside a group, nor does a separator (a group holds things to open).
@@ -2279,6 +2479,7 @@ impl Dock {
             self.show();
         }
         self.incoming = Some(Incoming { gap: None, onto: None, label: Vec::new() });
+        self.drag_scrolled = None;
         self.drop_over(pt)
     }
 
@@ -2289,6 +2490,7 @@ impl Dock {
         // Measured against where the dock is when fully out, so this works while it slides in.
         let (along, _, from_dock) = self.place().locate(pt.x, pt.y);
         let (x, y) = (along as f32, from_dock as f32);
+        self.drag_scroll(x, y);
         let onto = self.layout.onto_icon(x, y).filter(|&index| self.takes_drops(index));
         let gap = if onto.is_some() || self.layout.drag_is_off(x, y) { None } else { Some(self.layout.insert_gap(x)) };
         let label = match onto {
@@ -3303,6 +3505,9 @@ impl Dock {
     fn end_group(&mut self, why: &str) {
         let Some(open) = self.group.take() else { return };
         self.child_press = None;
+        if matches!(self.hint, Some(Pressed::Child(..))) {
+            self.hint = None;
+        }
         if self.log_groups {
             let label = self.items.get(open.index).map(|item| edit::label_of(&item.cfg)).unwrap_or_default();
             log_info!("closed group {label} ({why})");
@@ -3326,13 +3531,19 @@ impl Dock {
         // land shows as a bar.
         let dragged = self.drag.as_ref().filter(|drag| drag.index == open.index).and_then(|drag| drag.child);
         let marker = self.drag.as_ref().and_then(|drag| drag.in_popup).filter(|&(group, _)| group == open.index).map(|(_, gap)| gap);
+        // Opening with a double click, after one click on an item: how to open it, as its name.
+        let hinted = match self.hint {
+            Some(Pressed::Child(group, k)) if group == open.index => Some(k),
+            _ => None,
+        };
+        let hint_text: Vec<u16> = if hinted.is_some() { crate::text::t(DOUBLE_CLICK_HINT).encode_utf16().collect() } else { Vec::new() };
         let shown: Vec<popup::Shown> = item
             .children
             .iter()
             .enumerate()
             .map(|(k, child)| popup::Shown {
                 icon: child.icon.as_ref(),
-                label: &child.label,
+                label: if hinted == Some(k) { &hint_text } else { &child.label },
                 dim: self.missing_children.contains(&(open.index, k)),
                 ghost: dragged == Some(k),
             })
@@ -3400,12 +3611,19 @@ impl Dock {
                 }
                 if open.hovered != at {
                     open.hovered = at;
+                    // Off the item that said how to open it: its name again.
+                    if matches!(self.hint, Some(Pressed::Child(..))) {
+                        self.hint = None;
+                    }
                     self.render_popup();
                 }
                 (done, None)
             }
             WM_MOUSELEAVE => {
                 open.tracking = false;
+                if matches!(self.hint, Some(Pressed::Child(..))) {
+                    self.hint = None;
+                }
                 if open.hovered.take().is_some() {
                     self.render_popup();
                 }
@@ -3417,6 +3635,7 @@ impl Dock {
                 // Hold the mouse while the button is down, so a drag out of the pop-up keeps
                 // getting moves (not when locked: then a press can only be a click).
                 let group = open.index;
+                self.note_press(at.map(|k| Pressed::Child(group, k)));
                 let locked = self.settings.locked && !system::control_down(); // Ctrl overrides Lock
                 if let (Some(k), false, Some(pt), Some(window)) = (at, locked, system::cursor_pos(), self.popup_window) {
                     self.child_press = Some((group, k, pt));
@@ -3433,6 +3652,11 @@ impl Dock {
                     return (done, None);
                 };
                 if child.is_separator() {
+                    return (done, None);
+                }
+                // Opening with a double click, one click opens nothing here either.
+                if self.settings.double_click && !self.second_press {
+                    self.lone_click(Pressed::Child(index, k), &edit::label_of(&child), false);
                     return (done, None);
                 }
                 self.close_group("launched an item");
@@ -3875,8 +4099,116 @@ impl Dock {
             if let Some(index) = hovered {
                 self.request_zoom(index);
             }
+            // Off the item that said how to open it: its name, when it's pointed at again.
+            if matches!(self.hint, Some(Pressed::Item(_))) {
+                self.hint = None;
+            }
         }
         self.hovered = hovered;
+        // Scrolling: the arrow under the pointer lights up.
+        let arrow = self.layout.arrow_at(x, y);
+        if arrow != self.arrow_hovered {
+            self.arrow_hovered = arrow;
+            if self.window_visible {
+                self.render();
+            }
+        }
+    }
+
+    /// The arrow under the pointer (a mouse message's position), if the dock scrolls.
+    fn arrow_under(&self, lparam: LPARAM) -> Option<layout::Arrow> {
+        let (x, y) = point_from_lparam(lparam);
+        let (along, away) = self.layout.geo.frame().from_window(x as f32, y as f32);
+        self.layout.arrow_at(along, away)
+    }
+
+    /// Scrolling: sends the icons `target` along (kept within what there is); they glide there.
+    /// An open group's pop-up closes (its icon moves away from under it), except during a drag:
+    /// an item dragged out of it is still held by it.
+    fn scroll_to(&mut self, target: f32, why: &str) {
+        let target = target.clamp(0.0, self.layout.max_offset());
+        if (target - self.scroll_target).abs() < 0.5 {
+            return;
+        }
+        if self.drag.is_none() {
+            self.close_group("the dock scrolled");
+        }
+        log_info!("scrolled to {target:.0} of {:.0} ({why})", self.layout.max_offset());
+        self.scroll_span_from = self.scroll_span();
+        self.scroll_target = target;
+        self.scroll_from = self.scroll_shown;
+        if self.reduced_motion || !self.window_visible {
+            self.scroll_shown = target;
+            self.scroll_since = None;
+            self.layout.set_offset(target);
+            if self.window_visible {
+                self.render();
+            }
+        } else {
+            self.scroll_since = Some(Instant::now());
+        }
+    }
+
+    /// Where the icons show between the arrows now (window x from and to): where they show at
+    /// rest where they're going, moving there from where they showed with them as they glide, so
+    /// none pops in or out and the room separators leave at the ends shifts smoothly.
+    fn scroll_span(&self) -> (f32, f32) {
+        let to = self.layout.shown_span(self.scroll_target);
+        if self.scroll_since.is_none() {
+            return to;
+        }
+        let from = self.scroll_span_from;
+        (self.glide_between(from.0, to.0), self.glide_between(from.1, to.1))
+    }
+
+    /// `a` to `b` as far as the icons have glided toward where they're going.
+    fn glide_between(&self, a: f32, b: f32) -> f32 {
+        let travel = self.scroll_target - self.scroll_from;
+        let done = if travel.abs() > 0.5 { ((self.scroll_shown - self.scroll_from) / travel).clamp(0.0, 1.0) } else { 1.0 };
+        a + (b - a) * done
+    }
+
+    /// An arrow clicked (a page) or the mouse wheel (one icon), from where the icons are going.
+    fn scroll_by(&mut self, arrow: layout::Arrow, page: bool, why: &str) {
+        let from = self.scroll_target;
+        let target = if page { self.layout.page(arrow, from) } else { self.layout.step(arrow, from) };
+        self.scroll_to(target, why);
+    }
+
+    /// The pointer stays put while icons move under it: the one under it now is the one
+    /// pointed at.
+    fn rehover(&mut self) {
+        if !self.tracking_mouse || self.drag.is_some() {
+            return;
+        }
+        let Some(pt) = system::cursor_pos() else { return };
+        let (left, top) = self.origin();
+        let (along, away) = self.layout.geo.frame().from_window((pt.x - left) as f32, (pt.y - top) as f32);
+        let hovered = self.layout.hit_test(along, away);
+        if hovered != self.hovered {
+            if let Some(index) = hovered {
+                self.request_zoom(index);
+            }
+            self.hovered = hovered;
+        }
+    }
+
+    /// A drag (an icon, or files from Explorer) held on an arrow moves the icons along one at a
+    /// time, so what's dragged can go anywhere on the dock. Passing over an arrow moves nothing.
+    fn drag_scroll(&mut self, along: f32, away: f32) {
+        let Some(arrow) = self.layout.arrow_at(along, away) else {
+            self.drag_scrolled = None;
+            return;
+        };
+        let now = Instant::now();
+        match self.drag_scrolled {
+            Some((held, since)) if held == arrow && now.duration_since(since) < DRAG_SCROLL_EVERY => {}
+            Some((held, _)) if held == arrow => {
+                self.drag_scrolled = Some((arrow, now));
+                self.scroll_by(arrow, false, "a drag held on an arrow");
+            }
+            _ => self.drag_scrolled = Some((arrow, now)),
+        }
     }
 
     /// The launch effect on a clicked icon: a bounce or a glow pulse (none with Windows' "Animation
@@ -3887,6 +4219,71 @@ impl Dock {
             LaunchEffect::Bounce => item.bounce_start = Some(Instant::now()),
             LaunchEffect::Glow => item.pulse_start = Some(Instant::now()),
             LaunchEffect::None => {}
+        }
+    }
+
+    /// A press of the left button on an item (on the dock or in a group's pop-up) or on nothing.
+    /// Opening with a double click: whether it's the second press on that item. Any press puts
+    /// off the "Double-click to open" an earlier click was waiting to show.
+    fn note_press(&mut self, on: Option<Pressed>) {
+        self.stop_timer(TIMER_LONE_CLICK);
+        self.lone_click = None;
+        self.second_press = false;
+        self.clear_hint();
+        if !self.settings.double_click {
+            return;
+        }
+        match (on, system::cursor_pos()) {
+            (Some(on), Some(pt)) => self.second_press = self.double.press(on, (pt.x, pt.y), Instant::now(), system::double_click(self.dpi)),
+            _ => self.double.reset(),
+        }
+    }
+
+    /// Opening with a double click, one click on an item opened nothing. Unless the item has just
+    /// opened (the rest of a triple click), it says how to open it, in place of its name, once
+    /// Windows' double-click time has passed with no second press (`show_hint`).
+    fn lone_click(&mut self, on: Pressed, label: &str, just_opened: bool) {
+        if just_opened {
+            log_info!("click on {label} ignored: it has just opened");
+            return;
+        }
+        log_info!("one click on {label}: it opens with a double click");
+        self.lone_click = Some(on);
+        let wait = system::double_click(self.dpi).time;
+        self.start_timer(TIMER_LONE_CLICK, u32::try_from(wait.as_millis()).unwrap_or(u32::MAX));
+    }
+
+    /// The double-click time after one click has passed: if the pointer is still on that item, and
+    /// nothing else is going on, it reads "Double-click to open" instead of its name until the
+    /// pointer leaves it or the next press. (Where its name goes, so it's beside what was clicked
+    /// and never under an open group's pop-up.)
+    fn show_hint(&mut self) {
+        let Some(on) = self.lone_click.take() else { return };
+        let pointer_on = match on {
+            Pressed::Item(index) => self.window_visible && self.hovered == Some(index),
+            Pressed::Child(group, k) => self.group.as_ref().is_some_and(|open| open.index == group && open.hovered == Some(k)),
+        };
+        if !self.settings.double_click || !pointer_on || self.press.is_some() || self.drag.is_some() {
+            return;
+        }
+        log_info!("the clicked item says how to open it");
+        self.hint = Some(on);
+        match on {
+            Pressed::Item(_) => self.render(),
+            Pressed::Child(..) => {
+                self.render_popup();
+            }
+        }
+    }
+
+    /// The item that said "Double-click to open" shows its name again.
+    fn clear_hint(&mut self) {
+        match self.hint.take() {
+            Some(Pressed::Item(_)) if self.window_visible => self.render(),
+            Some(Pressed::Child(..)) if self.group.is_some() => {
+                self.render_popup();
+            }
+            _ => {}
         }
     }
 
@@ -3931,6 +4328,39 @@ impl Dock {
             WM_MOUSELEAVE => {
                 self.tracking_mouse = false;
                 self.hovered = None;
+                if matches!(self.hint, Some(Pressed::Item(_))) {
+                    self.hint = None;
+                }
+                if self.arrow_hovered.take().is_some() && self.window_visible {
+                    self.render();
+                }
+                (done, None)
+            }
+            // Scrolling: an arrow takes the press (it scrolls when let go on, below); nothing
+            // under it is picked up.
+            WM_LBUTTONDOWN if self.arrow_under(lparam).is_some() => {
+                self.arrow_pressed = self.arrow_under(lparam);
+                self.pressed = None;
+                self.note_press(None);
+                (done, None)
+            }
+            WM_LBUTTONUP if self.arrow_pressed.is_some() && self.drag.is_none() => {
+                if let Some(arrow) = self.arrow_pressed.take().filter(|&arrow| Some(arrow) == self.arrow_under(lparam)) {
+                    self.scroll_by(arrow, true, "an arrow clicked");
+                }
+                (done, None)
+            }
+            // The mouse wheel (turned toward you, or tilted right: on along the dock), a notch an icon.
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL if self.layout.scroll.is_some() => {
+                let delta = (wparam.0 >> 16) as u16 as i16 as i32;
+                self.wheel_rest += if msg == WM_MOUSEWHEEL { -delta } else { delta };
+                let mut target = self.scroll_target;
+                while self.wheel_rest.abs() >= WHEEL_NOTCH {
+                    let arrow = if self.wheel_rest > 0 { layout::Arrow::Forward } else { layout::Arrow::Back };
+                    self.wheel_rest -= WHEEL_NOTCH * self.wheel_rest.signum();
+                    target = self.layout.step(arrow, target);
+                }
+                self.scroll_to(target, "the mouse wheel");
                 (done, None)
             }
             WM_LBUTTONDOWN => {
@@ -3939,6 +4369,8 @@ impl Dock {
                     log_info!("dock: press at {x},{y} (window) on {:?}; group open: {}", self.hovered, self.group.is_some());
                 }
                 self.pressed = self.hovered;
+                self.arrow_pressed = None; // (one pressed and let go off the dock never scrolls later)
+                self.note_press(self.hovered.map(Pressed::Item));
                 // An icon, or a separator (picked up and moved like one; never clicked).
                 let grabbed = self.hovered.or_else(|| self.separator_at(lparam));
                 // Hold on to the mouse while the button is down, so a drag keeps getting moves
@@ -3965,6 +4397,13 @@ impl Dock {
                 match (self.pressed.take(), self.hovered) {
                     (Some(pressed), Some(hovered)) if pressed == hovered => {
                         let now = Instant::now();
+                        // Opening with a double click, one click opens nothing (a group still
+                        // opens with one), though it closes an open group as any click does.
+                        if self.settings.double_click && self.items[pressed].cfg.kind != Kind::Group && !self.second_press {
+                            self.close_group("another item clicked");
+                            self.lone_click(Pressed::Item(pressed), &edit::label_of(&self.items[pressed].cfg), self.clicks.holds(pressed, now));
+                            return (done, None);
+                        }
                         if !self.clicks.allow(pressed, now) {
                             log_info!("click on {} ignored: the second half of a double-click", edit::label_of(&self.items[pressed].cfg));
                             return (done, None);
@@ -4057,6 +4496,11 @@ impl Dock {
                 if self.resting && self.window_visible && !self.needs_frames() {
                     self.tidy_hidden();
                 }
+                (done, None)
+            }
+            WM_TIMER if wparam.0 == TIMER_LONE_CLICK => {
+                self.stop_timer(TIMER_LONE_CLICK);
+                self.show_hint();
                 (done, None)
             }
             WM_TIMER if wparam.0 == TIMER_STRIP => {
@@ -4308,8 +4752,18 @@ impl Dock {
         if (self.hovered == Some(index) || onto) && self.reveal_target == 1.0 { 1.0 } else { 0.0 }
     }
 
+    /// Whether an arrow's glow is going up (1: under the pointer, where it can go on) or down.
+    fn arrow_glow_goal(&self) -> [f32; 2] {
+        [layout::Arrow::Back, layout::Arrow::Forward].map(|arrow| {
+            let lit = self.arrow_hovered == Some(arrow) && self.layout.can_scroll(arrow, self.scroll_target) && self.reveal_target == 1.0;
+            if lit { 1.0 } else { 0.0 }
+        })
+    }
+
     fn needs_frames(&self) -> bool {
         self.popup_fading.is_some()
+            || self.scroll_since.is_some()
+            || self.arrow_glow != self.arrow_glow_goal()
             || self.reveal != self.reveal_target
             || self
                 .items
@@ -4354,8 +4808,31 @@ impl Dock {
             }
         }
 
+        // Scrolling: the icons glide to where an arrow or the wheel sent them, and settle.
+        let scrolling = self.scroll_since.is_some();
+        if let Some(since) = self.scroll_since {
+            let t = if self.reduced_motion { 1.0 } else { now.duration_since(since).as_secs_f32() / SCROLL_GLIDE.as_secs_f32() };
+            self.scroll_shown = if t >= 1.0 { self.scroll_target } else { self.scroll_from + (self.scroll_target - self.scroll_from) * motion::ease_out(t) };
+            if t >= 1.0 {
+                self.scroll_since = None;
+                self.layout.set_offset(self.scroll_shown);
+            } else {
+                let view_start = self.layout.scroll.map_or(0.0, |s| s.view_start);
+                self.layout.set_offset_padded(self.scroll_shown, self.scroll_span().0 - view_start);
+            }
+            self.rehover();
+        }
+        let arrow_goal = self.arrow_glow_goal();
+        let arrows_glowing = self.arrow_glow != arrow_goal;
+        let (glow_in, glow_out) = if self.reduced_motion { (0, 0) } else { (ARROW_GLOW_IN, ARROW_GLOW_OUT) };
+        for (glow, goal) in self.arrow_glow.iter_mut().zip(arrow_goal) {
+            *glow = motion::step_toward(*glow, goal, dt, glow_in, glow_out);
+        }
+
         self.fade_popup();
         let content_changing = !self.slide_by_moving
+            || scrolling
+            || arrows_glowing
             || effects_were_running
             || shifts_were_moving
             || (0..self.items.len()).any(|i| self.items[i].hover_t != self.hover_goal(i))
@@ -4617,23 +5094,39 @@ impl Dock {
                 );
             }
 
+            // Scrolling: under the pointer, an arrow's end of the panel glows, brightest at the
+            // end and fading out smoothly toward the icons (under them), in the panel's own round
+            // shape. In the separators' colour: white on most styles, dark on a milky panel. (Made
+            // with the layout, in `apply_layout`; here it's only shown as strong as it is now.)
+            for (glow_t, glow) in self.arrow_glow.into_iter().zip(&self.arrow_glows) {
+                if let Some(glow) = glow.as_ref().filter(|_| glow_t > 0.0) {
+                    glow.SetOpacity(glow_t * glow_t * (3.0 - 2.0 * glow_t));
+                    rt.FillRoundedRectangle(&round_at(left, top, right, bottom, g.radius), glow);
+                }
+            }
+
             let inset = (4.0 * g.scale).round();
+            // Scrolling: separators, resting icons and their names show only between the arrows,
+            // leaving the room beside them clear. An icon pointed at grows over everything, arrows
+            // too, as it does anywhere on the dock, and its glow isn't cut off.
+            let scroll = self.layout.scroll;
+            // Where they show: the whole icons that fit, moving with them as they glide (see
+            // `scroll_span`).
+            let span = self.scroll_span();
+            let clip = || {
+                if scroll.is_some() {
+                    rt.PushAxisAlignedClip(&at(span.0, -10_000.0, span.1, 10_000.0), D2D1_ANTIALIAS_MODE_ALIASED);
+                }
+            };
+            let unclip = || {
+                if scroll.is_some() {
+                    rt.PopAxisAlignedClip();
+                }
+            };
             let icon_opacity = self.settings.icon_opacity as f32 / 100.0;
             let mut icons = Vec::with_capacity(self.layout.slots.len());
             let dragged = self.drag.as_ref().filter(|drag| drag.child.is_none()).map(|drag| drag.index);
             let into = self.drag.as_ref().and_then(|drag| drag.into);
-            for slot in &self.layout.slots {
-                if Some(slot.item) == dragged {
-                    continue; // it's under the pointer, in its own window
-                }
-                if slot.separator {
-                    let x = (slot.center(&g) + self.items[slot.item].shift).floor();
-                    brush.SetColor(&colour(skin.divider, 1.0));
-                    rt.FillRectangle(&at(x, g.panel_top + inset, x + 1.0, g.panel_h - inset), brush);
-                } else {
-                    icons.push(slot);
-                }
-            }
             // Glows go under every icon, so a glow never tints the icon beside it.
             let peak = skin.glow_peak;
             if let Some(mask) = &glow_mask {
@@ -4652,14 +5145,30 @@ impl Dock {
                 }
                 rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
-            // Enlarged icons are drawn last, so they sit on top of their neighbours instead of
-            // under the next icon along (the most enlarged on top of all).
-            icons.sort_by(|a, b| self.items[a.item].hover_t.total_cmp(&self.items[b.item].hover_t));
-            for slot in icons {
+            clip();
+            for slot in &self.layout.slots {
+                if Some(slot.item) == dragged {
+                    continue; // it's under the pointer, in its own window
+                }
+                if slot.separator {
+                    let x = (slot.center(&g) + self.items[slot.item].shift).floor();
+                    brush.SetColor(&colour(skin.divider, 1.0));
+                    rt.FillRectangle(&at(x, g.panel_top + inset, x + 1.0, g.panel_h - inset), brush);
+                } else {
+                    icons.push(slot);
+                }
+            }
+            // One icon. `whole`: drawn all of it (one pointed at); otherwise one reaching under an
+            // arrow fades as it goes.
+            let draw_icon = |slot: &layout::Slot, whole: bool| {
                 let item = &self.items[slot.item];
                 let (x, y, size) = layout::icon_rect(&g, slot, item.hover_t, item.bounce(g.bounce));
                 let x = x + item.shake(6.0 * g.scale) + item.shift;
                 let dest = at(x, y, x + size, y + size);
+                let part = if whole { 1.0 } else { self.layout.shown_part_in(x, x + size, span) };
+                if part <= 0.0 {
+                    return;
+                }
                 if into == Some(slot.item) {
                     // The group a dragged icon would go into lights up.
                     let m = 5.0 * g.scale;
@@ -4667,35 +5176,72 @@ impl Dock {
                     rt.FillRoundedRectangle(&round_at(x - m, y - m, x + size + m, y + size + m, size * 0.25), brush);
                 }
                 if item.shows_preview() {
-                    let opacity = icon_opacity + (1.0 - icon_opacity) * item.hover_t;
+                    let opacity = (icon_opacity + (1.0 - icon_opacity) * item.hover_t) * part;
                     draw_group_tile(&rt, brush, item, dest, opacity);
-                    continue;
+                    return;
                 }
                 let bitmap = if size > g.icon + 0.5 { item.zoom.as_ref().or(item.base.as_ref()) } else { item.base.as_ref() };
                 match bitmap {
                     Some(bitmap) => {
                         // The icon opacity setting, rising to solid as the icon grows under the
                         // pointer. Dimmed further: the program is missing and couldn't be repaired.
-                        let opacity = icon_opacity + (1.0 - icon_opacity) * item.hover_t;
+                        let opacity = (icon_opacity + (1.0 - icon_opacity) * item.hover_t) * part;
                         let dim = self.missing.contains(&slot.item);
                         let opacity = if dim { 0.4 * opacity } else { opacity };
                         rt.DrawBitmap(bitmap, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
                     }
                     None => {
-                        brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.35));
+                        brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.35 * part));
                         rt.FillRoundedRectangle(&round_at(x, y, x + size, y + size, size * 0.2), brush);
                     }
                 }
+            };
+            // Enlarged icons are drawn last, so they sit on top of their neighbours instead of
+            // under the next icon along (the most enlarged on top of all). Scrolling, they're drawn
+            // after the arrows too.
+            icons.sort_by(|a, b| self.items[a.item].hover_t.total_cmp(&self.items[b.item].hover_t));
+            let (resting, grown): (Vec<&layout::Slot>, Vec<&layout::Slot>) = icons.into_iter().partition(|slot| scroll.is_none() || self.items[slot.item].hover_t <= 0.0);
+            for slot in &resting {
+                draw_icon(slot, false);
             }
+            unclip();
+            // Scrolling: a chevron at each end (‹ › along the dock, up and down on a side), a fine
+            // line with round ends, dimmed where it can't go on. On a milky panel (frosted, a light
+            // capsule: dark separators) dark; on the others white.
+            // (Made with the layout, in `apply_layout`.)
+            if scroll.is_some() {
+                let on_milk = skin.divider.0 < 0.5;
+                let width = (1.7 * g.scale).max(1.5);
+                let arrows = [layout::Arrow::Back, layout::Arrow::Forward];
+                for ((glow_t, arrow), chevron) in self.arrow_glow.into_iter().zip(arrows).zip(&self.chevrons) {
+                    let Some(chevron) = chevron else { continue };
+                    let live = self.layout.can_scroll(arrow, self.scroll_target);
+                    // Brighter as its glow comes up.
+                    let alpha = if live { 0.78 + 0.22 * glow_t } else { 0.3 };
+                    brush.SetColor(&if on_milk { rgba(0.12, 0.16, 0.24, 0.9 * alpha) } else { rgba(1.0, 1.0, 1.0, alpha) });
+                    self.renderer.stroke(chevron, brush, width);
+                }
+            }
+            for slot in &grown {
+                draw_icon(slot, true);
+            }
+            clip();
 
             // Under the hovered icon its name; under an icon something is dragged onto, what would
             // happen (shown even with labels off: it's the only sign of what a drop will do).
             let into_text = into.and_then(|g| self.items.get(g)).map(|item| tr!("Move into {group}", group = edit::shown_label_of(&item.cfg)).encode_utf16().collect::<Vec<u16>>());
+            // Opening with a double click, after one click: how to open it, where its name goes.
+            let hinted = match self.hint {
+                Some(Pressed::Item(index)) if self.hovered == Some(index) => Some(index),
+                _ => None,
+            };
+            let hint_text = hinted.map(|_| crate::text::t(DOUBLE_CLICK_HINT).encode_utf16().collect::<Vec<u16>>());
             let onto = self
                 .incoming
                 .as_ref()
                 .and_then(|incoming| incoming.onto.map(|index| (index, &incoming.label)))
-                .or(into.zip(into_text.as_ref()));
+                .or(into.zip(into_text.as_ref()))
+                .or(hinted.zip(hint_text.as_ref()));
             // With names always shown, the one just left keeps its full name while it shrinks back,
             // fading into its short one.
             let always = self.settings.show_labels && self.settings.always_show_labels;
@@ -4745,7 +5291,9 @@ impl Dock {
                         let right = left + names.cell_w - 8.0 * g.scale;
                         if right > from && left < to { t } else { 0.0 }
                     });
-                    let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside) * (1.0 - covered);
+                    // (Scrolling: it fades with its icon under an arrow.)
+                    let part = self.layout.shown_part_in(slot.center(&g) + item.shift - g.icon / 2.0, slot.center(&g) + item.shift + g.icon / 2.0, span);
+                    let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside) * (1.0 - covered) * part;
                     if opacity <= 0.01 {
                         continue;
                     }
@@ -4763,6 +5311,7 @@ impl Dock {
                     rt.DrawBitmap(&names.picture, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&source));
                 }
             }
+            unclip();
             // (Beside the icon on a side: its own format, from the icon outward, cut short.)
             let label_format = if g.edge.is_side() { &self.side_format } else { &self.text_format };
             if let (Some((index, text)), Some(format)) = (shown, label_format) {
@@ -6042,6 +6591,19 @@ pub fn snapshot(config: Config, home: Home, dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_changed_on_the_dock_is_the_item_added_or_moved() {
+        let dock = |names: &str| names.split(' ').map(|name| (Kind::App, name.to_string(), String::new(), String::new(), 0)).collect::<Vec<ItemKey>>();
+        let was = dock("a b c d e");
+        assert_eq!(changed_item(&was, &was), None, "nothing changed");
+        assert_eq!(changed_item(&was, &dock("a b x c d e")), Some(2), "one added at 2 (put back, dropped in)");
+        assert_eq!(changed_item(&was, &dock("a b c d e x")), Some(5), "one added at the end");
+        assert_eq!(changed_item(&was, &dock("b c d a e")), Some(3), "a moved on to 3");
+        assert_eq!(changed_item(&was, &dock("a e b c d")), Some(1), "e moved back to 1");
+        assert_eq!(changed_item(&was, &dock("a b X d e")), Some(2), "one changed");
+        assert_eq!(changed_item(&was, &dock("a b d e")), None, "one removed: nothing to show");
+    }
 
     /// The glow's shape: full under the middle of the icon, fading gradually, nothing at the
     /// edge and no rim. It is drawn as one mask; this keeps that mask's shape.
