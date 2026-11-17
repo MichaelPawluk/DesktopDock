@@ -84,11 +84,32 @@ fn said(english: &'static str) -> String {
     crate::text::t(english).to_string()
 }
 
+thread_local! {
+    /// Windows' code for the last request that couldn't reach the server (0: none), kept for
+    /// `Status::detail`: what a plain "couldn't reach GitHub" was, for whoever looks into it.
+    static LAST_FAILURE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Windows' first try can fail at once and the next work a moment later: a name it couldn't look
+/// up just then (12007), a connection refused or reset (12029, 12030). Those are tried once more
+/// before saying GitHub can't be reached. (A timeout isn't: it has already waited.)
+fn passing(code: u32) -> bool {
+    matches!(code, 12007 | 12029 | 12030)
+}
+
 /// Asks for one address: GitHub (https) or a test's own page on this computer (http). Redirects
 /// are followed only when `follow`, and from a test's page only to another of its pages; at most
 /// `limit` bytes are read.
 fn get(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
-    let mut reply = get_once(url, follow, limit)?;
+    LAST_FAILURE.set(0);
+    let mut reply = match get_once(url, follow, limit) {
+        Err(_) if passing(LAST_FAILURE.get()) => {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            LAST_FAILURE.set(0);
+            get_once(url, follow, limit)?
+        }
+        other => other?,
+    };
     // From a test's page, Windows doesn't follow redirects (it would follow them anywhere): they're
     // followed here, a few at most, only to another page on this computer.
     for _ in 0..3 {
@@ -114,6 +135,7 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
     unsafe {
         let session = WinHttpOpen(w!("DesktopDock-update-check"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
         if session.is_null() {
+            LAST_FAILURE.set(windows::Win32::Foundation::GetLastError().0);
             return Err(said(UNREACHABLE));
         }
         let protocols = (WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3).to_le_bytes();
@@ -133,6 +155,7 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
             }
         };
         if request.is_null() {
+            LAST_FAILURE.set(windows::Win32::Foundation::GetLastError().0);
             close();
             return Err(said(UNREACHABLE));
         }
@@ -140,7 +163,10 @@ fn get_once(url: &str, follow: bool, limit: usize) -> Result<Reply, String> {
         if !follow || !secure {
             let _ = WinHttpSetOption(Some(request as *const c_void), WINHTTP_OPTION_REDIRECT_POLICY, Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_le_bytes()));
         }
-        if WinHttpSendRequest(request, None, None, 0, 0, 0).is_err() || WinHttpReceiveResponse(request, std::ptr::null_mut()).is_err() {
+        let sent = WinHttpSendRequest(request, None, None, 0, 0, 0).and_then(|()| WinHttpReceiveResponse(request, std::ptr::null_mut()));
+        if let Err(e) = sent {
+            // (Windows' code is the error's low word: 12007 for a name not looked up, say.)
+            LAST_FAILURE.set((e.code().0 as u32) & 0xFFFF);
             close();
             return Err(said(UNREACHABLE));
         }
@@ -260,6 +286,9 @@ pub struct Status {
     pub error: String,
     /// The newest version the dock has said is out (it says so once).
     pub told: String,
+    /// Behind `error`, for whoever looks into it: Windows' code ("WinHTTP 12007"). Older
+    /// versions ignore it.
+    pub detail: String,
 }
 
 impl Status {
@@ -277,13 +306,16 @@ impl Status {
 
     pub fn save(&self, home: &Path) {
         let quote = |text: &str| toml_edit::Value::from(text).to_string();
-        let text = format!(
+        let mut text = format!(
             "# What Desktop Dock's last check for a new version found (Dock settings > About).\nchecked = {}\nlatest = {}\nerror = {}\ntold = {}\n",
             quote(&self.checked),
             quote(&self.latest),
             quote(&self.error),
             quote(&self.told)
         );
+        if !self.detail.is_empty() {
+            text.push_str(&format!("detail = {}\n", quote(&self.detail)));
+        }
         let path = Status::path(home);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -301,8 +333,13 @@ pub fn check_and_keep(home: &Path) -> Status {
         Ok(version) => {
             status.latest = shown(version);
             status.error.clear();
+            status.detail.clear();
         }
-        Err(e) => status.error = e,
+        Err(e) => {
+            status.error = e;
+            let code = LAST_FAILURE.get();
+            status.detail = if code != 0 { format!("WinHTTP {code}") } else { String::new() };
+        }
     }
     status.save(home);
     status
@@ -392,14 +429,25 @@ mod tests {
         let home = std::env::temp_dir().join(format!("dd-update-status-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(Status::load(&home), Status::default(), "never checked");
-        let status = Status { checked: "2026-11-10 17:02".into(), latest: "1.2.0".into(), error: String::new(), told: "1.1.9".into() };
+        let status = Status { checked: "2026-11-10 17:02".into(), latest: "1.2.0".into(), error: String::new(), told: "1.1.9".into(), detail: String::new() };
         status.save(&home);
         assert_eq!(Status::load(&home), status);
         assert_eq!(Status::load(&home).latest_version(), Some((1, 2, 0)));
-        let odd = Status { error: "Couldn't \"reach\" GitHub\nat all".into(), ..Default::default() };
+        let odd = Status { error: "Couldn't \"reach\" GitHub\nat all".into(), detail: "WinHTTP 12007".into(), ..Default::default() };
         odd.save(&home);
-        assert_eq!(Status::load(&home), odd, "quotes and line breaks survive");
+        assert_eq!(Status::load(&home), odd, "quotes and line breaks survive, and Windows' code behind it");
+        // What an older version wrote (no detail) still reads.
+        std::fs::write(Status::path(&home), "checked = \"2026-11-10 17:02\"\nlatest = \"1.2.0\"\nerror = \"\"\ntold = \"\"\n").unwrap();
+        assert_eq!(Status::load(&home).latest, "1.2.0");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_passing_failure_is_tried_once_more_and_a_timeout_is_not() {
+        // A name not looked up just then, a connection refused or reset: tried again.
+        assert!(passing(12007) && passing(12029) && passing(12030));
+        // A timeout has already waited; anything else is said at once.
+        assert!(!passing(12002) && !passing(0) && !passing(12175));
     }
 
     #[test]
@@ -429,6 +477,54 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// What the check sends, whole: a plain GET of the page, naming only the host and the
+    /// program, with nothing about the PC or its user: no query, cookie, referrer or login.
+    #[test]
+    fn the_update_check_sends_only_what_it_needs() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tell, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Some(stream) = listener.incoming().flatten().next() else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                lines.push(line.trim_end().to_string());
+                line.clear();
+            }
+            let mut stream = stream;
+            let _ = stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/releases/tag/v1.2.3\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = tell.send(lines);
+        });
+        let reply = get(&format!("http://127.0.0.1:{port}/releases/latest"), false, 4096).unwrap();
+        assert_eq!(reply.status, 302);
+        let lines = heard.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(lines[0], "GET /releases/latest HTTP/1.1", "a plain GET, no query");
+        let mut names: Vec<String> = Vec::new();
+        for header in &lines[1..] {
+            let (name, value) = header.split_once(':').unwrap();
+            let name = name.trim().to_ascii_lowercase();
+            match name.as_str() {
+                "host" => assert_eq!(value.trim(), format!("127.0.0.1:{port}")),
+                "user-agent" => assert_eq!(value.trim(), "DesktopDock-update-check", "the program's name, not its version or the PC's"),
+                "connection" => {}
+                _ => panic!("sends '{header}'"),
+            }
+            names.push(name);
+        }
+        names.sort();
+        assert_eq!(names, ["connection", "host", "user-agent"], "{lines:?}");
+    }
+
+    #[test]
+    fn the_update_check_asks_only_github() {
+        // Every address it builds starts from the releases page, on GitHub, over https.
+        assert!(RELEASES.starts_with("https://github.com/"));
+        assert_eq!(feed(), RELEASES, "without a test's own page set");
     }
 
     #[test]

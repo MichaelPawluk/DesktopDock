@@ -44,7 +44,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
     DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WHOLE_WORD,
-    DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat,
+    DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -247,8 +247,14 @@ const WM_APP_UPDATES_CHECKED: u32 = WM_APP + 14;
 /// Windows changed order with the desktop in use (`system::DesktopNews`): Show desktop may have
 /// lifted it over a dock resting behind windows.
 const WM_APP_DESKTOP_NEWS: u32 = WM_APP + 15;
-/// After that news, how long the dock looks quickly for the desktop being lifted over it.
+/// After that news, how long the dock looks quickly for the desktop being lifted over it. News
+/// that keeps coming (no quiet second between) gets that many looks in a row, then a rest.
 const DESKTOP_WATCH_FOR: Duration = Duration::from_millis(600);
+const DESKTOP_NEWS_QUIET: Duration = Duration::from_secs(1);
+const DESKTOP_WATCHES_IN_A_ROW: u32 = 3;
+const DESKTOP_WATCH_REST: Duration = Duration::from_secs(8);
+/// How long a look for a fullscreen program stands, while the window in front stays put.
+const FULLSCREEN_LOOK_AGAIN: Duration = Duration::from_secs(1);
 /// How often, at most, the dock looks for programs updated since their icons were made.
 const STAMP_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How long the dock stays out after the settings window's last change.
@@ -458,15 +464,18 @@ pub struct Dock {
     lone_click: Option<Pressed>,
     /// The item that says "Double-click to open" in place of its name, while the pointer stays on it.
     hint: Option<Pressed>,
+    /// The name of the icon pointed at, laid out once for as long as it shows (drawn five times
+    /// a frame, for its outline: DirectWrite would lay it out again each time), and how wide it
+    /// is (measured every frame with every name showing). Made again with the layout.
+    label_layout: RefCell<Option<(Vec<u16>, bool, (f32, f32), IDWriteTextLayout)>>,
+    label_width: RefCell<Option<(Vec<u16>, f32)>>,
     /// Scrolling (the icons don't fit and Screen > When the icons don't fit says scroll): how far
     /// along they're going, and how far they're drawn now, gliding there from `scroll_from`
-    /// since `scroll_since`, and where they showed then (window x from and to; see
-    /// `scroll_span`).
+    /// since `scroll_since`.
     scroll_target: f32,
     scroll_shown: f32,
     scroll_from: f32,
     scroll_since: Option<Instant>,
-    scroll_span_from: (f32, f32),
     /// The arrow under the pointer (lit), and the one pressed (it scrolls when let go on).
     arrow_hovered: Option<layout::Arrow>,
     arrow_pressed: Option<layout::Arrow>,
@@ -486,6 +495,8 @@ pub struct Dock {
     listening: bool,
     /// Windows wouldn't let it listen: it doesn't try again (and resting brings the dock out).
     listen_failed: bool,
+    /// Windows refused to stop sending the mouse's movement: tried again at each look.
+    stop_listening_failed: bool,
     /// The pointer can push: a mouse or a touchpad, as far as the dock has seen. A pen, touch,
     /// remote desktop or a program moving the pointer gives places, not movement, and can't
     /// push past the edge: then resting there brings the dock out, as on a free edge.
@@ -508,6 +519,11 @@ pub struct Dock {
     desktop_news: Option<system::DesktopNews>,
     /// Until when it looks quickly for Show desktop lifting the desktop over it.
     desktop_watch_until: Option<Instant>,
+    /// News that keeps coming: when it last came, the quick looks given it in a row, and the
+    /// rest from them (see `WM_APP_DESKTOP_NEWS`).
+    desktop_news_at: Option<Instant>,
+    desktop_watches: u32,
+    desktop_watch_rest_until: Option<Instant>,
     /// Staying out but sent away (a full-screen program): when it last looked whether it can
     /// come back.
     come_back_looked: Option<Instant>,
@@ -556,6 +572,8 @@ pub struct Dock {
     folder_watch: Option<HANDLE>,
     /// The fullscreen program last found in front, as the log said it (see `fullscreen_in_front`).
     fullscreen_seen: Option<String>,
+    /// Its last answer, for the window in front then and where that was, and when.
+    fullscreen_cache: Option<((isize, [i32; 4]), Instant, bool)>,
     /// The last keyboard or mouse input when the dock decided nobody was there.
     away_input_tick: u32,
     /// The keyboard shortcut registered now (see `apply_hotkey`).
@@ -747,8 +765,10 @@ struct Strip {
     text_rect: D2D_RECT_F,
     /// Its text on more than one line (a long one on a side).
     wrapped: bool,
-    /// Where "Undo" sits; None for a plain notice ("Icons are locked").
+    /// Where "Undo" sits; None for a plain notice ("Icons are locked"). Its word, in the language
+    /// in use.
     undo_rect: Option<D2D_RECT_F>,
+    undo: Vec<u16>,
 }
 
 /// Every icon's name drawn once, side by side in one picture, each in a cell as wide as an
@@ -857,10 +877,11 @@ impl Dock {
             second_press: false,
             lone_click: None,
             hint: None,
+            label_layout: RefCell::new(None),
+            label_width: RefCell::new(None),
             scroll_target: 0.0,
             scroll_shown: 0.0,
             scroll_from: 0.0,
-            scroll_span_from: (0.0, 0.0),
             scroll_since: None,
             arrow_hovered: None,
             arrow_glow: [0.0; 2],
@@ -872,6 +893,7 @@ impl Dock {
             push: Push::default(),
             listening: false,
             listen_failed: false,
+            stop_listening_failed: false,
             pointer_pushes: true,
             pointer_was: None,
             pointer_moved_at: None,
@@ -882,6 +904,9 @@ impl Dock {
             lowered: false,
             desktop_news: None,
             desktop_watch_until: None,
+            desktop_news_at: None,
+            desktop_watches: 0,
+            desktop_watch_rest_until: None,
             come_back_looked: None,
             button_up_since: None,
             previewing: false,
@@ -911,6 +936,7 @@ impl Dock {
             reduced_motion: false,
             folder_watch: None,
             fullscreen_seen: None,
+            fullscreen_cache: None,
             away_input_tick: 0,
             hotkey: None,
             loaded_text: None,
@@ -1098,6 +1124,9 @@ impl Dock {
             // unless it floats) to its bottom, at the background opacity setting.
             self.skin = skin::skin(self.settings.style, self.settings.look, self.windows_dark);
             self.names = None;
+            // (The name pointed at, laid out and measured in the formats made above: again.)
+            *self.label_layout.get_mut() = None;
+            *self.label_width.get_mut() = None;
             let solid = self.settings.background_opacity as f32 / 100.0;
             let colour = |Rgba(r, gr, b, a): Rgba| rgba(r, gr, b, a * solid);
             let stops = [
@@ -1884,12 +1913,12 @@ impl Dock {
         if text.trim().is_empty() {
             log_warn!("dock.toml is empty; keeping the current setup");
             return Err(tr!(
-                "{file} is empty, so the dock keeps your items as they are. It reads the file again once it has items in it (Dock settings > Versions has your recent versions).",
-                file = path.display()
-            ));
+                "Your dock's file is empty, so the dock keeps your items as they are. It reads the file again once it has items in it (Dock settings > Versions has your recent versions)."
+            )
+            .into());
         }
         let parsed = config::parse(&text)
-            .map_err(|e| tr!("{file} has an error:\n\n{error}\n\nThe dock keeps its current setup until the file is fixed.", file = path.display(), error = e))
+            .map_err(|e| tr!("Your dock's file has an error:\n\n{error}\n\nThe dock keeps its current setup until the file is fixed.", error = e))
             .inspect_err(|e| log_warn!("reload failed: {e}"))?;
         for warning in &parsed.warnings {
             log_warn!("dock.toml: {warning}");
@@ -2847,7 +2876,8 @@ impl Dock {
         }
         let mut status = update::Status::load(&self.home.dir);
         if !status.error.is_empty() {
-            log_info!("couldn't check for a new version: {}", status.error);
+            let detail = if status.detail.is_empty() { String::new() } else { format!(" ({})", status.detail) };
+            log_info!("couldn't check for a new version: {}{detail}", status.error);
             return;
         }
         let Some(version) = status.latest_version() else { return };
@@ -2924,6 +2954,7 @@ impl Dock {
             text_rect,
             wrapped,
             undo_rect: undoable.then(|| rect(undo_left, top, undo_left + undo_w, bottom)),
+            undo,
         });
         let now = Instant::now();
         self.linger_until = Some(self.linger_until.map_or(now + STRIP_FOR, |until| until.max(now + STRIP_FOR)));
@@ -2951,6 +2982,30 @@ impl Dock {
             }
             metrics.height.ceil()
         }
+    }
+
+    /// The name of the icon pointed at, laid out in `format` within `size` (see `label_layout`).
+    fn label_layout_of(&self, text: &[u16], format: &IDWriteTextFormat, side: bool, size: (f32, f32)) -> Option<IDWriteTextLayout> {
+        if let Some((was, was_side, was_size, layout)) = self.label_layout.borrow().as_ref() {
+            if was == text && *was_side == side && *was_size == size {
+                return Some(layout.clone());
+            }
+        }
+        let layout = unsafe { self.renderer.dwrite.CreateTextLayout(text, format, size.0, size.1) }.ok()?;
+        *self.label_layout.borrow_mut() = Some((text.to_vec(), side, size, layout.clone()));
+        Some(layout)
+    }
+
+    /// How wide the name of the icon pointed at is (`text_width`), kept while it shows.
+    fn label_width_of(&self, text: &[u16]) -> f32 {
+        if let Some((was, width)) = self.label_width.borrow().as_ref() {
+            if was == text {
+                return *width;
+            }
+        }
+        let width = self.text_width(text);
+        *self.label_width.borrow_mut() = Some((text.to_vec(), width));
+        width
     }
 
     fn text_width_in(&self, text: &[u16], format: &IDWriteTextFormat) -> f32 {
@@ -3308,6 +3363,15 @@ impl Dock {
     /// out of its way. The log says so when that changes, so a dock that "didn't come out" can
     /// be told from one that went wrong.
     fn fullscreen_in_front(&mut self) -> bool {
+        // (Asked at every check while the dock is out, and the look asks Windows several things:
+        // its answer stands while the window in front stays where it is, for up to a second.)
+        let now = Instant::now();
+        let front = system::front_window();
+        if let Some((was, at, answer)) = self.fullscreen_cache {
+            if was == front && now.duration_since(at) < FULLSCREEN_LOOK_AGAIN {
+                return answer;
+            }
+        }
         let found = system::fullscreen_in_front(self.screen.monitor);
         if found != self.fullscreen_seen {
             match &found {
@@ -3316,6 +3380,7 @@ impl Dock {
             }
             self.fullscreen_seen = found.clone();
         }
+        self.fullscreen_cache = Some((front, now, found.is_some()));
         found.is_some()
     }
 
@@ -3824,7 +3889,10 @@ impl Dock {
             // bring it, over the windows; it comes back under them once that's gone, below.)
             let always_behind = self.stays_out() && self.settings.stay_out == StayOut::AlwaysBehind;
             // Near an edge shared with a taskbar, it hears the mouse, to tell a push past the
-            // edge from a rest on the taskbar (see `wants_out`).
+            // edge from a rest on the taskbar (see `wants_out`). All over the taskbar, so a push
+            // counts from the moment the pointer reaches the edge: hearing costs nothing while
+            // the mouse is still, only the timed looks do (see `close` below).
+            let push_zone = place.shared() && self.layout.near_push_zone(&place, pt.x, pt.y);
             self.listen_for_push(near && place.shared() && !always_behind);
             self.check_pointer_kind(pt, now);
             if self.wants_out(&place, at_edge, now) && !always_behind && !self.fullscreen_in_front() {
@@ -3837,9 +3905,13 @@ impl Dock {
                     self.apply_staying_out();
                 }
             }
-            // Quick checks near the edge, and while any button is held (a drag may be on its way up).
-            let quick = near || self.drop_zone_shown || system::mouse_buttons_down();
-            self.set_poll(if quick { 16 } else { 100 });
+            // Quick checks near the edge, and while any button is held (a drag may be on its way
+            // up). On an edge shared with a taskbar, quick only close to the screen's edge: on the
+            // rest of the taskbar people rest the pointer on its buttons, and every 50 ms is soon
+            // enough to see it set off for the edge.
+            let close = near && (!place.shared() || push_zone);
+            let quick = close || self.drop_zone_shown || system::mouse_buttons_down();
+            self.set_poll(if quick { 16 } else if near { 50 } else { 100 });
         } else {
             // The dock (on top of the zone) takes drops now; the zone goes once the drag is over.
             if self.drop_zone_shown && !system::mouse_buttons_down() {
@@ -3876,6 +3948,7 @@ impl Dock {
             // (as coming out does; never for a window dragged up there). Always behind them, the
             // pointer never does.
             let comes_up = self.lowered && self.settings.stay_out.comes_up_at_edge();
+            let push_zone = place.shared() && self.layout.near_push_zone(&place, pt.x, pt.y);
             if comes_up {
                 self.listen_for_push(place.shared() && self.layout.near_edge(&place, pt.x, pt.y));
                 self.check_pointer_kind(pt, now);
@@ -3932,14 +4005,23 @@ impl Dock {
             // Resting while staying out, it's as quiet as when hidden (quick near the edge,
             // behind windows, so resting the pointer there is seen on time; always behind, the
             // edge brings nothing, so not there either).
+            // (On an edge shared with a taskbar, quick only close to the screen's edge, as when
+            // hidden.)
             let near = self.layout.near_edge(&place, pt.x, pt.y);
+            let close = near && (!place.shared() || push_zone);
             self.set_poll(if self.drag.is_some() || lingering {
                 16
             } else if self.group.is_some() {
                 25
             } else if self.stays_out() && self.resting {
                 let watching = self.desktop_watch_until.is_some_and(|until| now < until);
-                if (comes_up && near) || watching { 16 } else { 100 }
+                if (comes_up && close) || watching {
+                    16
+                } else if comes_up && near {
+                    50
+                } else {
+                    100
+                }
             } else {
                 50
             });
@@ -3980,9 +4062,19 @@ impl Dock {
             hwndTarget: if on { hwnd } else { HWND::default() },
         };
         if let Err(e) = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) } {
-            log_warn!("couldn't {} the mouse's movement: {e}; resting at the edge brings the dock out", if on { "hear" } else { "stop hearing" });
+            if !on {
+                // Still hearing it (Windows sends every move of the mouse while it does): tried
+                // again at the next look, said once.
+                if !self.stop_listening_failed {
+                    log_warn!("couldn't stop hearing the mouse's movement: {e}; trying again");
+                    self.stop_listening_failed = true;
+                }
+                return;
+            }
+            log_warn!("couldn't hear the mouse's movement: {e}; resting at the edge brings the dock out");
             self.listen_failed = true;
         }
+        self.stop_listening_failed = false;
         self.listening = on && !self.listen_failed;
         self.push.reset();
         self.pointer_was = None;
@@ -4134,7 +4226,6 @@ impl Dock {
             self.close_group("the dock scrolled");
         }
         log_info!("scrolled to {target:.0} of {:.0} ({why})", self.layout.max_offset());
-        self.scroll_span_from = self.scroll_span();
         self.scroll_target = target;
         self.scroll_from = self.scroll_shown;
         if self.reduced_motion || !self.window_visible {
@@ -4147,25 +4238,6 @@ impl Dock {
         } else {
             self.scroll_since = Some(Instant::now());
         }
-    }
-
-    /// Where the icons show between the arrows now (window x from and to): where they show at
-    /// rest where they're going, moving there from where they showed with them as they glide, so
-    /// none pops in or out and the room separators leave at the ends shifts smoothly.
-    fn scroll_span(&self) -> (f32, f32) {
-        let to = self.layout.shown_span(self.scroll_target);
-        if self.scroll_since.is_none() {
-            return to;
-        }
-        let from = self.scroll_span_from;
-        (self.glide_between(from.0, to.0), self.glide_between(from.1, to.1))
-    }
-
-    /// `a` to `b` as far as the icons have glided toward where they're going.
-    fn glide_between(&self, a: f32, b: f32) -> f32 {
-        let travel = self.scroll_target - self.scroll_from;
-        let done = if travel.abs() > 0.5 { ((self.scroll_shown - self.scroll_from) / travel).clamp(0.0, 1.0) } else { 1.0 };
-        a + (b - a) * done
     }
 
     /// An arrow clicked (a page) or the mouse wheel (one icon), from where the icons are going.
@@ -4537,10 +4609,27 @@ impl Dock {
             }
             WM_APP_DESKTOP_NEWS => {
                 // Up onto the desktop now, if Show desktop has lifted it; if not yet, looks quickly
-                // for a moment, in case it's about to.
+                // for a moment, in case it's about to. News after a quiet second always gets that
+                // look, so Show desktop is met at once. News that keeps coming (windows changing
+                // places again and again) gets three looks in a row, then a rest: it would keep it
+                // looking quickly. (It still looks at its usual pace meanwhile.)
                 if self.lowered && !self.onto_desktop() {
-                    self.desktop_watch_until = Some(Instant::now() + DESKTOP_WATCH_FOR);
-                    self.set_poll(16);
+                    let now = Instant::now();
+                    if self.desktop_news_at.is_none_or(|at| now.duration_since(at) >= DESKTOP_NEWS_QUIET) {
+                        (self.desktop_watches, self.desktop_watch_rest_until) = (0, None);
+                    }
+                    self.desktop_news_at = Some(now);
+                    let watching = self.desktop_watch_until.is_some_and(|until| now < until);
+                    let resting = self.desktop_watch_rest_until.is_some_and(|until| now < until);
+                    if !watching && !resting {
+                        self.desktop_watch_until = Some(now + DESKTOP_WATCH_FOR);
+                        self.desktop_watches += 1;
+                        if self.desktop_watches >= DESKTOP_WATCHES_IN_A_ROW {
+                            self.desktop_watch_rest_until = Some(now + DESKTOP_WATCH_FOR + DESKTOP_WATCH_REST);
+                            self.desktop_watches = 0;
+                        }
+                        self.set_poll(16);
+                    }
                 }
                 (done, None)
             }
@@ -4587,6 +4676,8 @@ impl Dock {
                 (done, None)
             }
             WM_APP_TEST_WHERE if crate::home::is_dev_build() => {
+                // (Between numbered begin and end lines, so a test knows it has the whole list.)
+                log_info!("TEST where begin {}", wparam.0);
                 let g = self.layout.geo;
                 for slot in &self.layout.slots {
                     let item = &self.items[slot.item];
@@ -4605,6 +4696,7 @@ impl Dock {
                         log_info!("TEST where: in group {} at {x},{y}", edit::label_of(&child.cfg));
                     }
                 }
+                log_info!("TEST where end {}", wparam.0);
                 (done, None)
             }
             WM_APP_TEST_GROUP if crate::home::is_dev_build() => {
@@ -4815,11 +4907,8 @@ impl Dock {
             self.scroll_shown = if t >= 1.0 { self.scroll_target } else { self.scroll_from + (self.scroll_target - self.scroll_from) * motion::ease_out(t) };
             if t >= 1.0 {
                 self.scroll_since = None;
-                self.layout.set_offset(self.scroll_shown);
-            } else {
-                let view_start = self.layout.scroll.map_or(0.0, |s| s.view_start);
-                self.layout.set_offset_padded(self.scroll_shown, self.scroll_span().0 - view_start);
             }
+            self.layout.set_offset(self.scroll_shown);
             self.rehover();
         }
         let arrow_goal = self.arrow_glow_goal();
@@ -5110,9 +5199,8 @@ impl Dock {
             // leaving the room beside them clear. An icon pointed at grows over everything, arrows
             // too, as it does anywhere on the dock, and its glow isn't cut off.
             let scroll = self.layout.scroll;
-            // Where they show: the whole icons that fit, moving with them as they glide (see
-            // `scroll_span`).
-            let span = self.scroll_span();
+            // Where they show: between the arrows (see `Layout::view_span`).
+            let span = self.layout.view_span();
             let clip = || {
                 if scroll.is_some() {
                     rt.PushAxisAlignedClip(&at(span.0, -10_000.0, span.1, 10_000.0), D2D1_ANTIALIAS_MODE_ALIASED);
@@ -5165,7 +5253,7 @@ impl Dock {
                 let (x, y, size) = layout::icon_rect(&g, slot, item.hover_t, item.bounce(g.bounce));
                 let x = x + item.shake(6.0 * g.scale) + item.shift;
                 let dest = at(x, y, x + size, y + size);
-                let part = if whole { 1.0 } else { self.layout.shown_part_in(x, x + size, span) };
+                let part = if whole { 1.0 } else { self.layout.shown_part(x, x + size) };
                 if part <= 0.0 {
                     return;
                 }
@@ -5271,7 +5359,8 @@ impl Dock {
                 let cover = if g.names_h > 0.0 && !g.edge.is_side() {
                     shown.and_then(|(index, text)| {
                         let slot = self.layout.slot_of(index)?;
-                        let half = self.text_width_in(text, self.text_format.as_ref()?) / 2.0 + 4.0 * g.scale;
+                        self.text_format.as_ref()?;
+                        let half = self.label_width_of(text) / 2.0 + 4.0 * g.scale;
                         let cx = slot.center(&g) + self.items[index].shift;
                         Some((cx - half, cx + half, self.items[index].hover_t))
                     })
@@ -5292,7 +5381,7 @@ impl Dock {
                         if right > from && left < to { t } else { 0.0 }
                     });
                     // (Scrolling: it fades with its icon under an arrow.)
-                    let part = self.layout.shown_part_in(slot.center(&g) + item.shift - g.icon / 2.0, slot.center(&g) + item.shift + g.icon / 2.0, span);
+                    let part = self.layout.shown_part(slot.center(&g) + item.shift - g.icon / 2.0, slot.center(&g) + item.shift + g.icon / 2.0);
                     let opacity = (1.0 - item.hover_t) * (1.0 - 0.8 * beside) * (1.0 - covered) * part;
                     if opacity <= 0.01 {
                         continue;
@@ -5335,14 +5424,23 @@ impl Dock {
                     } else {
                         at(cx - 200.0, text_top, cx + 200.0, text_top + g.label_h)
                     };
-                    // A thin dark outline keeps white text readable on any wallpaper.
+                    // A thin dark outline keeps white text readable on any wallpaper. (Laid out once,
+                    // drawn five times: as drawing the text in that area each time does.)
+                    let size = (area.right - area.left, area.bottom - area.top);
+                    let laid_out = self.label_layout_of(text, format, g.edge.is_side(), size);
+                    let draw_at = |dx: f32, dy: f32| match &laid_out {
+                        Some(layout) => rt.DrawTextLayout(Vector2 { X: area.left + dx, Y: area.top + dy }, layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE),
+                        None => {
+                            let shifted = rect(area.left + dx, area.top + dy, area.right + dx, area.bottom + dy);
+                            rt.DrawText(text, format, &shifted, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL)
+                        }
+                    };
                     brush.SetColor(&rgba(0.0, 0.0, 0.0, 0.55 * opacity));
                     for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
-                        let shifted = rect(area.left + dx, area.top + dy, area.right + dx, area.bottom + dy);
-                        rt.DrawText(text, format, &shifted, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        draw_at(dx, dy);
                     }
                     brush.SetColor(&rgba(1.0, 1.0, 1.0, opacity));
-                    rt.DrawText(text, format, &area, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    draw_at(0.0, 0.0);
                 }
             }
             if let (Some(strip), Some(format)) = (&self.strip, &self.text_format) {
@@ -5360,8 +5458,7 @@ impl Dock {
                 }
                 if let Some(undo_rect) = strip.undo_rect {
                     brush.SetColor(&rgba(0.52, 0.72, 0.92, 1.0));
-                    let undo: Vec<u16> = tr!("Undo").encode_utf16().collect();
-                    rt.DrawText(&undo, format, &middle(undo_rect), brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    rt.DrawText(&strip.undo, format, &middle(undo_rect), brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 }
             }
             rt.SetTransform(&translate(0.0, 0.0));
@@ -5516,8 +5613,8 @@ fn show_child_menu(hwnd: HWND, pt: POINT, group: usize, child: usize) {
         };
         // Nothing to offer that could only fail: say why instead.
         let why = match mode {
-            Mode::SafeStart => Some(tr!("dock.toml has an error (right-click the dock to restore it)")),
-            Mode::ReadOnly => Some(tr!("dock.toml is from a newer Desktop Dock: it's used as it is")),
+            Mode::SafeStart => Some(tr!("Your dock's file has an error (right-click the dock to restore it)")),
+            Mode::ReadOnly => Some(tr!("Your dock's file is from a newer Desktop Dock: it's used as it is")),
             Mode::Normal if locked => Some(tr!("Icons are locked (right-click the dock to unlock)")),
             Mode::Normal => None,
         };
@@ -5620,11 +5717,8 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
                 .into_iter()
                 .take(PUT_BACK_SHOWN)
                 .map(|entry| {
-                    let when = match entry.removed_at.split_once(' ') {
-                        Some((date, time)) if date == today => time.get(..5).unwrap_or(time).to_string(),
-                        Some((date, _)) => date.to_string(),
-                        None => entry.removed_at.clone(),
-                    };
+                    // Today's by their time, older ones by their date, as Windows writes them.
+                    let when = crate::text::time_or_day(&entry.removed_at, &today);
                     (entry.removed_at, format!("{}\t{when}", entry.label))
                 })
                 .collect(),
@@ -5703,7 +5797,7 @@ fn show_menu(hwnd: HWND, pt: POINT, item: Option<usize>) {
                     for (k, place) in places.iter().enumerate() {
                         match place {
                             Some(place) => {
-                                let _ = AppendMenuW(windows, MF_STRING, MENU_ADD_WINDOWS + k, &HSTRING::from(place.name.as_str()));
+                                let _ = AppendMenuW(windows, MF_STRING, MENU_ADD_WINDOWS + k, &HSTRING::from(place.name.replace('&', "&&")));
                             }
                             None => {
                                 let _ = AppendMenuW(windows, MF_SEPARATOR, 0, PCWSTR::null());

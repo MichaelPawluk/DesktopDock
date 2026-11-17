@@ -96,9 +96,6 @@ pub struct Scroll {
     pub max: f32,
     /// How far along they are now: 0 puts the first slot at the view's start.
     pub offset: f32,
-    /// How far in from the view's start they're drawn now: separators can leave room that whole
-    /// icons don't fill, and it's split between both ends (see `Layout::pad`).
-    pub pad: f32,
 }
 
 impl Scroll {
@@ -230,7 +227,7 @@ pub fn compute(settings: &DockSettings, separators: &[bool], dpi: u32, max_panel
     let scroll = scroll_len.map(|len| {
         let (view_start, view_end) = (margin_x + inset + arrow + space, margin_x + len - inset - arrow - space);
         let max = slots.iter().map(|slot| slot.left).find(|&left| x - left <= view_end - view_start + 0.5).unwrap_or(0.0);
-        Scroll { view_start, view_end, arrow, inset, space, total: x, max, offset: 0.0, pad: 0.0 }
+        Scroll { view_start, view_end, arrow, inset, space, total: x, max, offset: 0.0 }
     });
     let geo = Geometry {
         scale,
@@ -442,6 +439,17 @@ impl Layout {
         away >= 0 && from_dock <= self.geo.panel_h as i32 && along >= start - 64 && along < end + 64
     }
 
+    /// On an edge shared with a taskbar: the pointer within the dock's span and a few pixels of
+    /// the screen's edge, where a push past it begins. `near_edge` there covers the whole
+    /// taskbar, where people rest the pointer on its buttons for as long as they like: only this
+    /// close is the pointer looked at quickly.
+    pub fn near_push_zone(&self, place: &Place, x: i32, y: i32) -> bool {
+        const ZONE: i32 = 8;
+        let (start, end) = self.panel_span();
+        let (along, away, _) = place.locate(x, y);
+        (0..=ZONE).contains(&away) && along >= start - 64 && along < end + 64
+    }
+
     /// Pointer over the shown dock (or over a taskbar beside it, on the way there), with a few
     /// pixels' grace.
     pub fn pointer_over(&self, place: &Place, x: i32, y: i32) -> bool {
@@ -455,38 +463,16 @@ impl Layout {
 /// the view's start) to `max_offset` (the last against the forward arrow). Without scrolling,
 /// everything is in view and nothing moves.
 impl Layout {
-    /// How long the slots are that fit whole between the arrows from `offset` along.
-    fn run(&self, offset: f32) -> f32 {
-        let Some(s) = self.scroll else { return 0.0 };
-        let end = offset + s.view_len();
-        let last = self.slots.iter().map(|slot| slot.left + slot.width).filter(|&right| right <= end + 0.5).fold(offset, f32::max);
-        last - offset
+    /// Where the icons show: window x from and to, the view between the arrows. (While it
+    /// scrolls every slot is as long as an icon's, separators too, so at every rest place whole
+    /// icons fill the view exactly.)
+    pub fn view_span(&self) -> (f32, f32) {
+        self.scroll.map_or((f32::MIN, f32::MAX), |s| (s.view_start, s.view_end))
     }
 
-    /// At rest `offset` along, how far in from the view's start the icons sit: separators can
-    /// leave room that whole icons don't fill, and it's split between both ends rather than
-    /// showing a cut icon or piling up before one arrow.
-    pub fn pad(&self, offset: f32) -> f32 {
-        self.scroll.map_or(0.0, |s| ((s.view_len() - self.run(offset)) / 2.0).floor().max(0.0))
-    }
-
-    /// Where the icons show at rest `offset` along: window x from and to.
-    pub fn shown_span(&self, offset: f32) -> (f32, f32) {
-        let Some(s) = self.scroll else { return (f32::MIN, f32::MAX) };
-        let from = s.view_start + self.pad(offset);
-        (from, from + self.run(offset))
-    }
-
-    /// Where they show now.
-    fn span_now(&self) -> (f32, f32) {
-        let Some(s) = self.scroll else { return (f32::MIN, f32::MAX) };
-        let from = s.view_start + s.pad;
-        (from, from + self.run(s.offset))
-    }
-
-    /// Window x where the icons show now, between the arrows.
+    /// Window x where the icons show, between the arrows.
     pub fn in_view(&self, x: f32) -> bool {
-        let (from, to) = self.span_now();
+        let (from, to) = self.view_span();
         x >= from && x < to
     }
 
@@ -495,7 +481,7 @@ impl Layout {
         if self.scroll.is_none() {
             return x;
         }
-        let (from, to) = self.span_now();
+        let (from, to) = self.view_span();
         x.clamp(from, (to - 0.5).max(from))
     }
 
@@ -503,18 +489,11 @@ impl Layout {
         self.scroll.map_or(0.0, |s| s.max_offset())
     }
 
-    /// Draws and hits everything `offset` along (kept within what there is), at rest there.
+    /// Draws and hits everything `offset` along (kept within what there is).
     pub fn set_offset(&mut self, offset: f32) {
-        let pad = self.pad(offset.clamp(0.0, self.max_offset()));
-        self.set_offset_padded(offset, pad);
-    }
-
-    /// The same `pad` in from the view's start (gliding from one rest to another).
-    pub fn set_offset_padded(&mut self, offset: f32, pad: f32) {
         if let Some(s) = &mut self.scroll {
             s.offset = offset.clamp(0.0, s.max_offset());
-            s.pad = pad;
-            self.geo.origin = s.view_start + pad - s.offset;
+            self.geo.origin = s.view_start - s.offset;
         }
     }
 
@@ -627,14 +606,10 @@ impl Layout {
     /// How much of something from `from` to `to` along (window x) shows between the arrows now:
     /// 1 all of it, 0 none.
     pub fn shown_part(&self, from: f32, to: f32) -> f32 {
-        self.shown_part_in(from, to, self.span_now())
-    }
-
-    /// The same, the icons showing in `span` (window x from and to, as `shown_span` gives).
-    pub fn shown_part_in(&self, from: f32, to: f32, span: (f32, f32)) -> f32 {
         if self.scroll.is_none() {
             return 1.0;
         }
+        let span = self.view_span();
         if to <= from {
             return if from >= span.0 && from < span.1 { 1.0 } else { 0.0 };
         }
@@ -933,6 +908,28 @@ mod tests {
     }
 
     #[test]
+    fn on_a_taskbar_it_shares_only_the_screens_edge_is_watched_closely() {
+        let layout = compute(&settings(), &small_dock(), 96, None);
+        let along = (layout.geo.panel_left + layout.geo.panel_w / 2.0) as i32;
+        // A 48 px taskbar on the dock's edge: the whole of it is near the edge, but only its
+        // outer few pixels are where a push begins.
+        for place in [
+            Place { edge: Edge::Bottom, start: 200, screen_edge: 1079, dock_edge: 1079 - 48 },
+            Place { edge: Edge::Left, start: 100, screen_edge: 0, dock_edge: 48 },
+        ] {
+            for (away, zone) in [(0, true), (8, true), (9, false), (24, false), (47, false)] {
+                let (x, y) = place.point(along, away);
+                assert!(layout.near_edge(&place, x, y), "{:?} {away} px in: on the taskbar, near the edge", place.edge);
+                assert_eq!(layout.near_push_zone(&place, x, y), zone, "{:?} {away} px in from the screen's edge", place.edge);
+            }
+            let (x, y) = place.point(-200, 0);
+            assert!(!layout.near_push_zone(&place, x, y), "{:?}: beyond the dock's span", place.edge);
+            let (x, y) = place.point(along, -1);
+            assert!(!layout.near_push_zone(&place, x, y), "{:?}: past the edge, another screen", place.edge);
+        }
+    }
+
+    #[test]
     fn a_taskbar_on_the_edge_makes_it_shared_and_a_push_goes_into_each_edge() {
         // Moving the mouse down, up, left and right: into the edge is positive on each.
         let place = |edge, screen_edge, dock_edge| Place { edge, start: 0, screen_edge, dock_edge };
@@ -1213,7 +1210,7 @@ mod tests {
             let mut offset = 0.0;
             for _ in 0..8 {
                 layout.set_offset(offset);
-                let (from, to) = layout.shown_span(offset);
+                let (from, to) = layout.view_span();
                 for slot in layout.slots.iter().filter(|slot| !slot.separator) {
                     let c = slot.center(&layout.geo);
                     let part = layout.shown_part(c - g.icon / 2.0, c + g.icon / 2.0);
@@ -1221,13 +1218,6 @@ mod tests {
                     if part == 0.0 {
                         assert!(c - g.icon / 2.0 >= to - 0.5 || c + g.icon / 2.0 <= from + 0.5, "dpi {dpi}: icon {} hides between the icons", slot.item);
                     }
-                }
-                let s = layout.scroll.unwrap();
-                let (before, after) = (from - s.view_start, s.view_end - to);
-                assert!(before + after < g.icon + g.gap && (before - after).abs() <= 1.0, "dpi {dpi} at {offset}: less than an icon's room left over, split between the ends ({before}, {after})");
-                let y = g.pad_top + g.icon / 2.0;
-                for x in [(s.view_start + from) / 2.0, (to + s.view_end) / 2.0].into_iter().filter(|_| before >= 1.0) {
-                    assert_eq!(layout.hit_test(x, y), None, "dpi {dpi}: nothing to hit in the room left over");
                 }
                 offset = layout.page(Arrow::Forward, offset);
             }
@@ -1241,7 +1231,7 @@ mod tests {
         // or the wheel sends them starts on a slot, the end included, and there the last icon
         // shows whole, the less than an icon's room left split between the two ends.
         let layout = compute(&scrolling(), &full_dock(), 96, Some(LAPTOP));
-        let (s, g) = (layout.scroll.unwrap(), layout.geo);
+        let s = layout.scroll.unwrap();
         let starts: Vec<f32> = layout.slots.iter().map(|slot| slot.left).collect();
         assert!(starts.contains(&s.max), "the end is a slot's start");
         for arrow in [Arrow::Forward, Arrow::Back] {
@@ -1257,11 +1247,32 @@ mod tests {
         at_end.set_offset(s.max);
         assert_eq!(at_end.whole_in_view().last(), Some(&43));
         let last = at_end.slot_of(43).unwrap();
-        let (from, to) = at_end.shown_span(s.max);
-        assert_eq!(to, at_end.geo.origin + last.left + last.width, "they show up to the last icon");
-        let (before, after) = (from - s.view_start, s.view_end - to);
-        assert!(before + after < g.icon + g.gap && (before - after).abs() <= 1.0, "{before} px before the first, {after} after the last");
+        assert_eq!(at_end.view_span().1, at_end.geo.origin + last.left + last.width, "the last icon ends at the forward arrow's side of the view");
         assert_eq!(layout.page(Arrow::Back, layout.page(Arrow::Forward, 0.0)), 0.0);
+    }
+
+    #[test]
+    fn at_every_rest_place_whole_icons_fill_the_view_exactly() {
+        // While it scrolls every slot is as long as an icon's (a separator too), so every rest
+        // place an arrow or the wheel sends the icons to holds whole slots, end to end, from the
+        // back arrow's side of the view to the forward one's: no room left at either end.
+        for (items, dpi, room) in [(vec![false; 60], 144, 1904.0), (full_dock(), 96, LAPTOP), (full_dock(), 144, LAPTOP * 1.5)] {
+            let layout = compute(&scrolling(), &items, dpi, Some(room));
+            let s = layout.scroll.unwrap();
+            let unit = layout.geo.icon + layout.geo.gap;
+            assert!(layout.slots.iter().all(|slot| (slot.width - unit).abs() < 0.01), "dpi {dpi}: every slot an icon's length");
+            let mut offset = 0.0;
+            for _ in 0..80 {
+                let filled: f32 = layout.slots.iter().filter(|slot| slot.left >= offset - 0.5 && slot.left + slot.width <= offset + s.view_len() + 0.5).map(|slot| slot.width).sum();
+                assert!((filled - s.view_len()).abs() < 0.5, "dpi {dpi} at {offset}: whole slots fill {filled} of the view's {}", s.view_len());
+                let next = layout.step(Arrow::Forward, offset);
+                if next == offset {
+                    break;
+                }
+                offset = next;
+            }
+            assert_eq!(offset, s.max, "dpi {dpi}: all the way along");
+        }
     }
 
     #[test]

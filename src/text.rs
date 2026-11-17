@@ -262,31 +262,74 @@ fn fill(template: &str, args: &[(&str, &dyn Display)]) -> String {
 
 /// A moment the dock wrote down ("2026-11-11 01:21", local time, as its stores keep it), as
 /// Windows writes a short date and time in your region ("11/11/2026 1:21 AM", "11.11.2026 01:21").
-/// Anything else comes back as it is.
+/// A date alone is written as a date. Anything else comes back as it is.
 pub fn when(stamp: &str) -> String {
+    written(stamp, Part::DateAndTime, false)
+}
+
+/// The same, to the second when the moment has seconds ("11/11/2026 1:21:07 AM"): for lists where
+/// two can be a minute apart.
+pub fn when_exactly(stamp: &str) -> String {
+    written(stamp, Part::DateAndTime, true)
+}
+
+/// Only its time ("1:21 AM") if it was today (`today` as the dock writes dates, "2026-11-11"),
+/// otherwise only its date: for a short list.
+pub fn time_or_day(stamp: &str, today: &str) -> String {
+    let part = if stamp.get(..10) == Some(today) { Part::Time } else { Part::Date };
+    written(stamp, part, false)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    DateAndTime,
+    Date,
+    Time,
+}
+
+fn written(stamp: &str, part: Part, seconds: bool) -> String {
     use windows::Win32::Foundation::SYSTEMTIME;
-    use windows::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS};
+    use windows::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_FORMAT_FLAGS, TIME_NOSECONDS};
     use windows::core::PCWSTR;
     let number = |range: std::ops::Range<usize>| stamp.get(range).and_then(|s| s.parse::<u16>().ok());
+    let bytes = stamp.as_bytes();
+    let is_date = bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-';
+    let has_time = is_date && bytes.len() >= 16 && matches!(bytes[10], b' ' | b'T') && bytes[13] == b':';
+    let has_seconds = has_time && bytes.len() >= 19 && bytes[16] == b':';
+    if !is_date || (bytes.len() > 10 && !has_time) || (part == Part::Time && !has_time) {
+        return stamp.to_string();
+    }
     let parsed = (|| {
-        let bytes = stamp.as_bytes();
-        if bytes.len() < 16 || bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b' ' | b'T') || bytes[13] != b':' {
-            return None;
+        let mut time = SYSTEMTIME { wYear: number(0..4)?, wMonth: number(5..7)?, wDay: number(8..10)?, ..Default::default() };
+        if has_time {
+            time.wHour = number(11..13)?;
+            time.wMinute = number(14..16)?;
         }
-        Some(SYSTEMTIME { wYear: number(0..4)?, wMonth: number(5..7)?, wDay: number(8..10)?, wHour: number(11..13)?, wMinute: number(14..16)?, ..Default::default() })
+        if has_seconds {
+            time.wSecond = number(17..19)?;
+        }
+        Some(time)
     })();
     let Some(time) = parsed else { return stamp.to_string() };
     let user = PCWSTR::null(); // the user's own region
-    let mut date = [0u16; 64];
-    let mut clock = [0u16; 64];
-    unsafe {
-        let d = GetDateFormatEx(user, DATE_SHORTDATE, Some(&time), PCWSTR::null(), Some(&mut date), PCWSTR::null());
-        let c = GetTimeFormatEx(user, TIME_NOSECONDS, Some(&time), PCWSTR::null(), Some(&mut clock));
-        if d <= 1 || c <= 1 {
-            return stamp.to_string();
-        }
-        format!("{} {}", String::from_utf16_lossy(&date[..d as usize - 1]), String::from_utf16_lossy(&clock[..c as usize - 1]))
-    }
+    let date = || {
+        let mut out = [0u16; 64];
+        let n = unsafe { GetDateFormatEx(user, DATE_SHORTDATE, Some(&time), PCWSTR::null(), Some(&mut out), PCWSTR::null()) };
+        (n > 1).then(|| String::from_utf16_lossy(&out[..n as usize - 1]))
+    };
+    let clock = || {
+        let flags = if seconds && has_seconds { TIME_FORMAT_FLAGS(0) } else { TIME_NOSECONDS };
+        let mut out = [0u16; 64];
+        let n = unsafe { GetTimeFormatEx(user, flags, Some(&time), PCWSTR::null(), Some(&mut out)) };
+        (n > 1).then(|| String::from_utf16_lossy(&out[..n as usize - 1]))
+    };
+    let shown = match part {
+        Part::Date => date(),
+        Part::Time => clock(),
+        Part::DateAndTime if !has_time => date(),
+        Part::DateAndTime => date().zip(clock()).map(|(d, c)| format!("{d} {c}")),
+    };
+    shown.unwrap_or_else(|| stamp.to_string())
 }
 
 /// A number with `decimals` places, written with your region's decimal sign ("14.5", "14,5").
@@ -585,7 +628,16 @@ mod tests {
         let shown = when("2026-11-11 01:21");
         assert!(shown.contains("2026") && shown.contains("11") && shown != "2026-11-11 01:21", "{shown}");
         assert_eq!(when("not a moment"), "not a moment");
-        assert_eq!(when("2026-11-11"), "2026-11-11", "a date alone stays as it is");
+        assert_eq!(when("2026-11-11x"), "2026-11-11x");
+        let day = when("2026-11-11");
+        assert!(day.contains("2026") && day != "2026-11-11" && day.len() < shown.len(), "a date alone, as a date: {day}");
+        let exact = when_exactly("2026-11-11 01:21:07");
+        assert!(exact.contains("07") && exact.len() > shown.len(), "{exact}");
+        assert_eq!(when_exactly("2026-11-11 01:21"), shown, "no seconds to show");
+        // Today: only the time. Another day: only the date.
+        let clock = time_or_day("2026-11-11 01:21:07.123", "2026-11-11");
+        assert!(!clock.contains("2026") && clock.contains("21") && !clock.contains("07"), "{clock}");
+        assert_eq!(time_or_day("2026-11-10 01:21:07.123", "2026-11-11"), when("2026-11-10"));
         let n = number(14.5, 1);
         assert!(n == "14.5" || n == "14,5" || n.len() == 4, "{n}");
         assert_eq!(number(3.0, 0), "3");

@@ -970,6 +970,17 @@ fn fullscreen_verdict(signal: Signal, front: Option<Win>, shown: &[Win]) -> Opti
     shown.iter().enumerate().find_map(|(i, window)| full(window).map(|confirmed| Fullscreen::Window { shown: Some(i), confirmed }))
 }
 
+/// The window in front and where it is: enough to tell when that changes (two cheap questions,
+/// where a look for a fullscreen program asks several).
+pub fn front_window() -> (isize, [i32; 4]) {
+    unsafe {
+        let window = GetForegroundWindow();
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(window, &mut rect);
+        (window.0 as isize, [rect.left, rect.top, rect.right, rect.bottom])
+    }
+}
+
 /// What fullscreen game, video or presentation is in front on this monitor, if any, in words
 /// for the log. Windows' own signal catches exclusive fullscreen; the rectangle check catches
 /// borderless-window games and fullscreen video, which the signal can miss. The rules are in
@@ -1033,6 +1044,9 @@ pub fn desktop_over(window: HWND) -> Option<HWND> {
 /// Where `DesktopNews` sends its note, and which message it sends.
 static DESKTOP_NEWS_TO: AtomicIsize = AtomicIsize::new(0);
 static DESKTOP_NEWS_MESSAGE: AtomicU32 = AtomicU32::new(0);
+/// When it last sent one (Windows' tick count, in ms): a note at most every quarter second, as
+/// windows that keep changing places would otherwise send one for every change.
+static DESKTOP_NEWS_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Hears windows change order while the desktop is the window in use (Show desktop lifting it
 /// over them all, a dock resting behind windows included), so the dock can come up onto it at once
@@ -1072,6 +1086,11 @@ unsafe extern "system" fn desktop_news(_hook: HWINEVENTHOOK, _event: u32, window
             return;
         }
     }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    if now.saturating_sub(DESKTOP_NEWS_SENT.load(Ordering::Relaxed)) < 250 {
+        return;
+    }
+    DESKTOP_NEWS_SENT.store(now, Ordering::Relaxed);
     let to = HWND(DESKTOP_NEWS_TO.load(Ordering::Relaxed) as *mut c_void);
     if !to.is_invalid() {
         unsafe {

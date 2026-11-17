@@ -223,6 +223,20 @@ pub fn on_network(path: &str) -> bool {
     }
 }
 
+/// A path on a removable drive (a USB stick, a memory card): one that isn't there whenever
+/// Windows starts.
+pub fn on_removable_drive(path: &str) -> bool {
+    const DRIVE_REMOVABLE: u32 = 2;
+    let path = path.trim().trim_start_matches('"');
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    match path.as_bytes() {
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => unsafe {
+            GetDriveTypeW(&HSTRING::from(format!("{}:\\", *letter as char))) == DRIVE_REMOVABLE
+        },
+        _ => false,
+    }
+}
+
 /// Windows' own name for a place, in your language: the "@file,-id" reference Windows keeps
 /// for it in the registry (File Explorer: the one its Start menu entry uses), loaded as text.
 /// Cheap, and none of the shell's machinery comes into the dock. None if there's no such name:

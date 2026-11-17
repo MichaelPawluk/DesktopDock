@@ -138,7 +138,7 @@ pub fn run(args: &[String], home: &std::path::Path) -> ! {
                 log_error!("dock crashed {} times in 10 minutes; stopped restarting it", MAX_CRASHES + 1);
                 crate::use_language_of(home); // (it may have been changed since the watchdog started)
                 system::notice_blocking(
-                    tr!("Desktop Dock crashed several times in a few minutes, so it won't restart by itself.\n\nThe details are in the dock folder's logs\\dock.log. Start it again from the Start menu when you're ready.")
+                    tr!("Desktop Dock crashed several times in a few minutes, so it won't restart by itself.\n\nStart it again from the Start menu when you're ready. What went wrong is in its log: Dock settings > About > Open the log.")
                         .into(),
                 );
                 std::process::exit(1);

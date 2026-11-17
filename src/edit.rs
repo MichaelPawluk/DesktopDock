@@ -222,7 +222,7 @@ pub fn ungroup(doc: &mut DocumentMut, index: usize, expect: &str) -> Result<usiz
 
 /// Sets one of the dock's settings (`[dock] key = value`), keeping any comment after it.
 pub fn set_dock(doc: &mut DocumentMut, key: &str, value: impl Into<toml_edit::Value>) -> Result<(), String> {
-    let dock = doc.entry("dock").or_insert(toml_edit::table()).as_table_mut().ok_or(tr!("[dock] in dock.toml isn't a section"))?;
+    let dock = doc.entry("dock").or_insert(toml_edit::table()).as_table_mut().ok_or(tr!("In your dock's file, [dock] isn't a section"))?;
     let mut value = value.into();
     match dock.get_mut(key).and_then(Item::as_value_mut) {
         Some(existing) => {
@@ -362,7 +362,7 @@ fn list_mut(doc: &mut DocumentMut, spot: Spot, create: bool) -> Result<&mut Arra
     if create && doc.get("item").is_none() {
         doc.insert("item", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    let items = doc.get_mut("item").and_then(Item::as_array_of_tables_mut).ok_or(tr!("dock.toml has no items"))?;
+    let items = doc.get_mut("item").and_then(Item::as_array_of_tables_mut).ok_or(tr!("Your dock's file has no items"))?;
     if spot.child.is_none() {
         return Ok(items);
     }

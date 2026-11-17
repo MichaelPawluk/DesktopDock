@@ -1,6 +1,5 @@
 //! A group's pop-up: the window that opens below a group's icon, showing its items in a grid
-//! (phone-folder style: every name shown, the group's name on top). A one-row "strip" was built
-//! too, to compare by feel; the grid was kept.
+//! (phone-folder style: every name shown, the group's name on top).
 //!
 //! This file holds what can be tested without a window: the layout (pure geometry, kept on the
 //! screen), the rules for when it closes, and its drawing. The window itself belongs to the dock

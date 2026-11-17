@@ -68,7 +68,7 @@ const TEST_ROOT: &str = "DESKTOP_DOCK_TEST_ROOT";
 
 /// What this run of the program is for, decided before anything else happens (no log, no
 /// window), so running a download never leaves files beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     /// The setup window: a copy run from outside its install folder.
     Setup,
@@ -79,13 +79,16 @@ pub enum Role {
     Run,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub quiet: bool,
     /// Start the installed dock afterwards.
     pub start: bool,
     /// Start with Windows: on or off; None leaves it as it is.
     pub startup: Option<bool>,
+    /// `--dir <folder>`: install there (a "Desktop Dock" folder in it, as Change... chooses),
+    /// moving it there if it's installed elsewhere. None: where it is, or the usual place.
+    pub dir: Option<PathBuf>,
 }
 
 /// Decides the role from the arguments and where this copy is. Pure, so it's tested.
@@ -93,7 +96,8 @@ pub fn role(args: &[String], exe: &Path, install_dir: Option<&Path>, dock_toml_b
     let has = |flag: &str| args.iter().any(|arg| arg.eq_ignore_ascii_case(flag));
     if has("--install") {
         let startup = if has("--no-startup") { None } else { Some(true) };
-        return Role::Install(Options { quiet: has("--quiet"), start: !has("--no-start"), startup });
+        let dir = args.iter().position(|arg| arg.eq_ignore_ascii_case("--dir")).and_then(|at| args.get(at + 1)).map(PathBuf::from);
+        return Role::Install(Options { quiet: has("--quiet"), start: !has("--no-start"), startup, dir });
     }
     if has("--uninstall") {
         return Role::Uninstall { quiet: has("--quiet"), remove_dock: has("--remove-dock") };
@@ -141,10 +145,10 @@ fn kept_key() -> String {
     if test_root().is_some() { format!("{KEPT_KEY}.Test") } else { KEPT_KEY.to_string() }
 }
 
-/// The folder an uninstall kept your dock in, if it's still there.
+/// The folder an uninstall kept your dock in, if your dock is still there.
 fn kept_dock_dir() -> Option<PathBuf> {
     let text = system::read_user_text(&kept_key(), "KeptDock")?;
-    Some(PathBuf::from(text.trim())).filter(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
+    Some(PathBuf::from(text.trim())).filter(|dir| !dir.as_os_str().is_empty() && dir.join("dock.toml").is_file())
 }
 
 /// Remembers (Some) or forgets (None) where an uninstall kept your dock.
@@ -184,17 +188,26 @@ fn recorded_install_dir() -> Option<PathBuf> {
 }
 
 /// The install folder for a folder you picked: a "Desktop Dock" folder in it (unless it is one
-/// already). What to say instead when it can't go there: on another computer, or somewhere
-/// only administrators may write (Program Files, say), which Desktop Dock never asks for.
+/// already). What to say instead when it can't go there: on another computer, or on a drive
+/// that comes and goes, or somewhere only administrators may write (Program Files, say), which
+/// Desktop Dock never asks for; or a folder already holding files that aren't Desktop Dock's,
+/// which removing it later must never touch.
 fn install_dir_in(picked: &Path) -> Result<PathBuf, String> {
-    if places::on_network(&picked.to_string_lossy()) {
+    let text = picked.to_string_lossy();
+    if places::on_network(&text) {
         return Err(tr!("That folder is on another computer. Choose one on this PC, so your dock works without the network.").into());
+    }
+    if places::on_removable_drive(&text) {
+        return Err(tr!("That's a removable drive. Choose a folder on this PC, so your dock is there whenever Windows starts.").into());
     }
     let dir = if picked.file_name().is_some_and(|name| name.eq_ignore_ascii_case("Desktop Dock")) {
         picked.to_path_buf()
     } else {
         picked.join("Desktop Dock")
     };
+    if !holds_only_ours(&dir) {
+        return Err(tr!("That folder already has other files in it. Choose an empty one, or the one it suggests.").into());
+    }
     // Tried for real (made and taken away again), as the install will.
     let made = !dir.is_dir();
     let tried = std::fs::create_dir_all(&dir).and_then(|()| {
@@ -206,12 +219,78 @@ fn install_dir_in(picked: &Path) -> Result<PathBuf, String> {
     }
     match tried {
         Ok(()) => Ok(dir),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(tr!(
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && for_administrators(&dir) => Err(tr!(
             "Only administrators can install there, and Desktop Dock installs without asking for that. Choose a folder of your own, like the one it suggests."
         )
         .into()),
+        // (A folder of your own Windows still won't let it write to: protected folders, say.)
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(tr!("Windows didn't allow writing there. Choose another folder, like the one it suggests.").into())
+        }
         Err(e) => Err(tr!("That folder can't be used: {why}", why = system::plain(&e.to_string()))),
     }
+}
+
+/// Program Files and Windows' own folder: only administrators may write there.
+fn for_administrators(dir: &Path) -> bool {
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "windir"]
+        .iter()
+        .filter_map(|name| std::env::var_os(name))
+        .any(|root| starts_with_folder(dir, Path::new(&root)))
+}
+
+/// `path` is `folder` or inside it, letters in any case (Windows' paths).
+fn starts_with_folder(path: &Path, folder: &Path) -> bool {
+    let (path, folder) = (path.to_string_lossy().to_lowercase(), folder.to_string_lossy().to_lowercase());
+    let folder = folder.trim_end_matches('\\');
+    !folder.is_empty() && (path == folder || path.starts_with(&format!("{folder}\\")))
+}
+
+/// A folder OneDrive keeps (it may hold its files only online, unless told to keep them here).
+fn kept_by_onedrive(dir: &Path) -> bool {
+    ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .iter()
+        .filter_map(|name| std::env::var_os(name))
+        .any(|root| starts_with_folder(dir, Path::new(&root)))
+}
+
+/// What Desktop Dock makes in its folder: the program and its working files (icon cache, log,
+/// updates, setup's log), and with `with_dock` your dock too (dock.toml, its versions, Recently
+/// removed, the shortcuts made for dropped files). Removing it touches only these: anything
+/// else in the folder stays where it is.
+fn own_entries(dir: &Path, with_dock: bool) -> Vec<PathBuf> {
+    let mut own: Vec<PathBuf> = ["desktop-dock.exe", "cache", "logs", "updates", "setup.log"].iter().map(|name| dir.join(name)).collect();
+    if with_dock {
+        own.extend(["dock.toml", "removed.toml", "backups", "shortcuts"].iter().map(|name| dir.join(name)));
+    }
+    // Old versions renamed aside, a new one half-written, saves cut off part way.
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let program = (name.starts_with("desktop-dock.old-") && name.ends_with(".exe"))
+            || name == "desktop-dock.exe.new"
+            || (name.starts_with("desktop-dock.exe.") && name.ends_with(".tmp"));
+        let saving = with_dock && name.ends_with(".tmp") && (name.starts_with("dock.toml.") || name.starts_with("removed.toml."));
+        if program || saving {
+            own.push(entry.path());
+        }
+    }
+    own
+}
+
+/// Nothing in `dir` but what Desktop Dock makes (or no folder at all yet).
+fn holds_only_ours(dir: &Path) -> bool {
+    let name = |path: &Path| path.file_name().map(|name| name.to_string_lossy().to_lowercase());
+    let own: Vec<_> = own_entries(dir, true).iter().map(|path| name(path)).collect();
+    std::fs::read_dir(dir).into_iter().flatten().flatten().all(|entry| own.contains(&name(&entry.path())))
+}
+
+/// Removes what Desktop Dock made in `dir` (see `own_entries`), then the folder itself if that
+/// left it empty. Anything else stays.
+fn remove_own(dir: &Path, with_dock: bool) {
+    for path in own_entries(dir, with_dock) {
+        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
+    let _ = std::fs::remove_dir(dir); // (only an empty folder goes)
 }
 
 fn shortcut_path() -> Option<PathBuf> {
@@ -321,6 +400,8 @@ pub enum Step {
     /// Only when a dock is running (an update).
     Close,
     Copy,
+    /// Only when it moves: your dock goes along.
+    MoveDock,
     StartMenu,
     InstalledApps,
     Startup,
@@ -328,13 +409,14 @@ pub enum Step {
 }
 
 impl Step {
-    const ALL: [Step; 6] = [Step::Close, Step::Copy, Step::StartMenu, Step::InstalledApps, Step::Startup, Step::Start];
+    const ALL: [Step; 7] = [Step::Close, Step::Copy, Step::MoveDock, Step::StartMenu, Step::InstalledApps, Step::Startup, Step::Start];
 
     /// What the setup window says during it.
     fn words(self) -> &'static str {
         match self {
             Step::Close => tr!("Closing the dock that's running..."),
             Step::Copy => tr!("Copying Desktop Dock..."),
+            Step::MoveDock => tr!("Moving your dock..."),
             Step::StartMenu => tr!("Adding it to the Start menu..."),
             Step::InstalledApps => tr!("Adding it to Installed apps..."),
             Step::Startup => tr!("Setting Start with Windows..."),
@@ -347,6 +429,7 @@ impl Step {
         match self {
             Step::Close => 5,
             Step::Copy => 25,
+            Step::MoveDock => 35,
             Step::StartMenu => 45,
             Step::InstalledApps => 65,
             Step::Startup => 80,
@@ -476,6 +559,259 @@ fn bytes_of(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Moves the installed Desktop Dock from `old` to `new` (a folder `install_dir_in` gave, empty
+/// or not there yet): the program (this copy, or the installed one if that's newer) and your
+/// dock with everything that's yours in it. Nothing in `old` changes until the dock is running
+/// from `new`; if anything goes wrong before that, all is put back as it was and the old dock
+/// runs again. Then what Desktop Dock made in `old` goes (anything else stays).
+pub fn move_install(options: &Options, old: &Path, new: &Path, progress: &dyn Fn(Step)) -> Result<(), String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    }
+    if same_path(old, new) {
+        return install(options.clone(), new, progress);
+    }
+    if starts_with_folder(new, old) || starts_with_folder(old, new) {
+        return Err(tr!("Desktop Dock can't move into its own folder, or into a folder around it. Choose another one.").into());
+    }
+    if std::fs::read_dir(new).is_ok_and(|mut entries| entries.next().is_some()) {
+        return Err(tr!("That folder isn't empty. Choose an empty one to move Desktop Dock to.").into());
+    }
+    let (old_exe, new_exe) = (old.join("desktop-dock.exe"), new.join("desktop-dock.exe"));
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    log(old, &format!("moving to {}", new.display()));
+    // (Read before anything changes: the sign-in task names the exe where it is now.)
+    let was_on = test_root().is_none() && crate::startup::starts_with_windows();
+    let mut stopped = false;
+    if test_root().is_none() {
+        close_settings_windows();
+        stopped = system::dock_is_running();
+        if stopped {
+            progress(Step::Close);
+        }
+        if !system::quit_running_dock() {
+            return Err(tr!("The running dock didn't close. Right-click it > Exit Desktop Dock, then try again.").into());
+        }
+        let _ = wait_until_free(Duration::from_secs(10));
+    }
+    let mut made: Vec<PathBuf> = Vec::new();
+    let result = (|| -> Result<(), String> {
+        // The program: this copy, unless the installed one is newer (moving is no downgrade).
+        progress(Step::Copy);
+        let newer_installed = version_of(&old_exe).is_some_and(|installed| installed > my_version());
+        let source = if newer_installed || same_path(&me, &old_exe) { old_exe.clone() } else { me.clone() };
+        let bytes = std::fs::read(&source).map_err(|e| tr!("Couldn't read {file}: {why}", file = source.display(), why = system::plain(&e.to_string())))?;
+        if !new.exists() {
+            std::fs::create_dir_all(new).map_err(|e| tr!("Couldn't make {folder}: {why}", folder = new.display(), why = system::plain(&e.to_string())))?;
+            made.push(new.to_path_buf());
+        }
+        put_in_place(new, &bytes)?;
+        made.push(new_exe.clone());
+        // Your dock, and its working files: copied, each checked against the original.
+        progress(Step::MoveDock);
+        let leave = |path: &Path| {
+            let name = path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+            name == "desktop-dock.exe" || name.ends_with(".tmp") || name == "desktop-dock.exe.new" || name.starts_with("desktop-dock.old-")
+        };
+        for path in own_entries(old, true).into_iter().filter(|path| path.exists() && !leave(path)) {
+            let to = new.join(path.strip_prefix(old).unwrap_or(&path));
+            if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("updates")) {
+                // (Only what the last check found: a download left there isn't needed.)
+                let status = path.join("status.toml");
+                if status.is_file() {
+                    copy_checked(&status, &to.join("status.toml"), &mut made)?;
+                }
+                continue;
+            }
+            copy_checked(&path, &to, &mut made)?;
+        }
+        // Files of yours your dock names by a path in its folder, so those items keep working
+        // (copied, never taken away from the old folder).
+        for path in files_the_dock_names(old) {
+            let to = new.join(path.strip_prefix(old).unwrap_or(&path));
+            if !to.exists() {
+                copy_checked(&path, &to, &mut made)?;
+            }
+        }
+        // Windows told where it is now: Installed apps, the Start menu, Start with Windows (it
+        // names the exe Installed apps records), and your own shortcuts to it.
+        progress(Step::StartMenu);
+        if let Err(e) = create_shortcut(&new_exe, new) {
+            log(old, &format!("no Start menu shortcut: {e}"));
+        }
+        progress(Step::InstalledApps);
+        write_uninstall_entry(&new_exe, new, bytes_of(&new_exe))?;
+        remember_kept_dock(None);
+        if was_on {
+            progress(Step::Startup);
+            crate::startup::set_starts_with_windows(true)?;
+        }
+        if test_root().is_none() {
+            let repointed = repoint_shortcuts(&old_exe, &new_exe, new);
+            if repointed > 0 {
+                log(old, &format!("pointed {repointed} shortcut(s) of yours at the new place"));
+            }
+        }
+        if options.start {
+            progress(Step::Start);
+            std::process::Command::new(&new_exe).current_dir(new).spawn().map_err(|e| tr!("Moved, but it didn't start: {why}", why = system::plain(&e.to_string())))?;
+            if test_root().is_none() {
+                let started = Instant::now();
+                while !system::dock_is_running() {
+                    if started.elapsed() > Duration::from_secs(15) {
+                        let _ = system::quit_running_dock();
+                        return Err(tr!("The dock didn't start from its new folder, so it stays where it was.").into());
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            log(new, &format!("moved here from {}", old.display()));
+            remove_own(old, true);
+            Ok(())
+        }
+        Err(e) => {
+            // All back as it was: Windows pointed at the old folder again, what was made in the
+            // new one taken away, and the old dock running.
+            log(old, &format!("moving failed, so nothing moved: {e}"));
+            let _ = write_uninstall_entry(&old_exe, old, bytes_of(&old_exe));
+            let _ = create_shortcut(&old_exe, old);
+            if was_on {
+                let _ = crate::startup::set_starts_with_windows(true);
+            }
+            if test_root().is_none() {
+                let _ = repoint_shortcuts(&new_exe, &old_exe, old);
+            }
+            for path in made.iter().rev() {
+                let _ = if path.is_dir() { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+            }
+            remove_old_copies(new);
+            let _ = std::fs::remove_dir(new);
+            if stopped || options.start {
+                let _ = std::process::Command::new(&old_exe).current_dir(old).spawn();
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Copies a file, or a folder and all in it, each file checked against the original (its
+/// size and SHA-256). Everything it makes goes on `made`, so a move that fails takes it away.
+fn copy_checked(from: &Path, to: &Path, made: &mut Vec<PathBuf>) -> Result<(), String> {
+    let failed = |e: std::io::Error| tr!("Couldn't copy {file}: {why}", file = from.display(), why = system::plain(&e.to_string()));
+    if from.is_dir() {
+        if !to.exists() {
+            std::fs::create_dir_all(to).map_err(failed)?;
+            made.push(to.to_path_buf());
+        }
+        for entry in std::fs::read_dir(from).map_err(failed)?.flatten() {
+            copy_checked(&entry.path(), &to.join(entry.file_name()), made)?;
+        }
+        return Ok(());
+    }
+    if let Some(folder) = to.parent().filter(|folder| !folder.exists()) {
+        std::fs::create_dir_all(folder).map_err(failed)?;
+        made.push(folder.to_path_buf());
+    }
+    let bytes = std::fs::read(from).map_err(failed)?;
+    std::fs::write(to, &bytes).map_err(failed)?;
+    made.push(to.to_path_buf());
+    let copy = std::fs::read(to).map_err(failed)?;
+    if copy.len() != bytes.len() || crate::update::sha256(&copy) != crate::update::sha256(&bytes) {
+        return Err(tr!("The copy of {file} didn't match the original.", file = from.display()));
+    }
+    Ok(())
+}
+
+/// Files of yours that your dock names by a path in its folder (relative, or a bare name the
+/// folder has), outside what Desktop Dock makes there: an item's program, start-in folder or icon.
+fn files_the_dock_names(dir: &Path) -> Vec<PathBuf> {
+    use crate::target::{Class, classify};
+    let Ok(parsed) = crate::config::load(&dir.join("dock.toml")) else { return Vec::new() };
+    let home = crate::home::Home::new(dir.to_path_buf());
+    let own = own_entries(dir, true);
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut visit = |text: &str| {
+        // (An icon is "file,index".)
+        let text = text.trim();
+        let text = match text.rsplit_once(',') {
+            Some((file, index)) if index.trim().parse::<i32>().is_ok() => file,
+            _ => text,
+        };
+        if text.is_empty() || !matches!(classify(text), Class::Relative | Class::Bare) {
+            return;
+        }
+        let path = PathBuf::from(home.resolve(text));
+        let inside = starts_with_folder(&path, dir) && !own.iter().any(|ours| starts_with_folder(&path, ours));
+        if inside && path.exists() && !found.contains(&path) {
+            found.push(path);
+        }
+    };
+    fn walk(items: &[crate::config::ItemConfig], visit: &mut dyn FnMut(&str)) {
+        for item in items {
+            visit(&item.target);
+            visit(&item.start_in);
+            visit(&item.icon);
+            walk(&item.items, visit);
+        }
+    }
+    walk(&parsed.config.items, &mut visit);
+    found
+}
+
+/// Your own shortcuts to `from_exe`, pinned to the taskbar or on the desktop, pointed at `to_exe`
+/// instead (Explorer shows the change when it next looks; it's never restarted for it). Returns
+/// how many.
+fn repoint_shortcuts(from_exe: &Path, to_exe: &Path, to_dir: &Path) -> usize {
+    use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::UI::Shell::FOLDERID_Desktop;
+    let mut folders = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        folders.push(PathBuf::from(appdata).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"));
+    }
+    folders.extend(known_folder(&FOLDERID_Desktop));
+    let mut done = 0;
+    for file in folders.iter().flat_map(|folder| std::fs::read_dir(folder).into_iter().flatten().flatten()) {
+        let path = file.path();
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lnk")) {
+            continue;
+        }
+        let changed = unsafe {
+            (|| -> windows::core::Result<bool> {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+                let file: IPersistFile = link.cast()?;
+                file.Load(&HSTRING::from(path.as_path()), STGM_READ)?;
+                let mut target = [0u16; 1024];
+                link.GetPath(&mut target, std::ptr::null_mut(), 0)?;
+                let len = target.iter().position(|&c| c == 0).unwrap_or(target.len());
+                if !same_path(Path::new(&String::from_utf16_lossy(&target[..len])), from_exe) {
+                    return Ok(false);
+                }
+                link.SetPath(&HSTRING::from(to_exe))?;
+                link.SetWorkingDirectory(&HSTRING::from(to_dir))?;
+                let mut icon = [0u16; 1024];
+                let mut index = 0;
+                if link.GetIconLocation(&mut icon, &mut index).is_ok() {
+                    let len = icon.iter().position(|&c| c == 0).unwrap_or(icon.len());
+                    if same_path(Path::new(&String::from_utf16_lossy(&icon[..len])), from_exe) {
+                        link.SetIconLocation(&HSTRING::from(to_exe), index)?;
+                    }
+                }
+                file.Save(&HSTRING::from(path.as_path()), true)?;
+                Ok(true)
+            })()
+        };
+        if changed.unwrap_or(false) {
+            done += 1;
+        }
+    }
+    done
+}
+
 /// The Start menu shortcut (Programs folder).
 fn create_shortcut(exe: &Path, dir: &Path) -> Result<PathBuf, String> {
     let path = shortcut_path().ok_or("no Start menu folder")?;
@@ -529,9 +865,20 @@ fn write_uninstall_entry(exe: &Path, dir: &Path, size: u64) -> Result<(), String
     Ok(())
 }
 
+/// What removing Desktop Dock left in its folder.
+#[derive(Debug, PartialEq)]
+pub enum Left {
+    Nothing,
+    /// Your dock (dock.toml and its versions), so installing again brings it back.
+    Dock(PathBuf),
+    /// Files that weren't Desktop Dock's, in a folder you chose: never touched.
+    Others(PathBuf),
+}
+
 /// Removes Desktop Dock: its shortcut, its Installed apps entry, Start with Windows, the program,
-/// its icon cache and logs; with `remove_dock`, your dock too. Returns what's left, if anything.
-pub fn uninstall(remove_dock: bool) -> Result<Option<PathBuf>, String> {
+/// its icon cache and logs; with `remove_dock`, your dock too. Only what Desktop Dock made goes
+/// (see `own_entries`). Returns what's left.
+pub fn uninstall(remove_dock: bool) -> Result<Left, String> {
     let dir = install_dir().ok_or(tr!("Windows didn't say where your programs go (LOCALAPPDATA)."))?;
     log(&dir, "removing Desktop Dock");
     if test_root().is_none() {
@@ -558,17 +905,26 @@ pub fn uninstall(remove_dock: bool) -> Result<Option<PathBuf>, String> {
             let _ = std::fs::rename(&me, &away);
         }
     }
-    let _ = std::fs::remove_file(&exe);
-    remove_old_copies(&dir);
-    for folder in ["cache", "logs", "updates"] {
-        let _ = std::fs::remove_dir_all(dir.join(folder));
+    // (Run from a copy in the temporary folder, see `run_uninstall`: the copy of setup that
+    // started it is ending, and its exe can be removed once it has.)
+    for _ in 0..50 {
+        match std::fs::remove_file(&exe) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => std::thread::sleep(Duration::from_millis(100)),
+            _ => break,
+        }
     }
-    let _ = std::fs::remove_file(dir.join("setup.log"));
-    if remove_dock {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    let left = dir.exists().then_some(dir);
-    remember_kept_dock(left.as_deref());
+    remove_own(&dir, remove_dock);
+    let left = if dir.join("dock.toml").is_file() {
+        Left::Dock(dir.clone())
+    } else if dir.exists() {
+        Left::Others(dir.clone())
+    } else {
+        Left::Nothing
+    };
+    remember_kept_dock(match &left {
+        Left::Dock(dir) => Some(dir),
+        _ => None,
+    });
     Ok(left)
 }
 
@@ -623,8 +979,12 @@ static FINISHED: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex
 struct SetupState {
     /// Where it goes: the suggested folder, the one you chose, or where it's installed.
     dir: Option<PathBuf>,
-    /// Already installed there (an update or reinstall goes where it is).
-    installed: bool,
+    /// Where it's installed, if it is; and, when you chose another folder with Change..., that
+    /// folder it moves from.
+    installed_dir: Option<PathBuf>,
+    moving: Option<PathBuf>,
+    /// The main button's words before a move was chosen (Install, Update...).
+    button: &'static str,
     /// It's a newer version than the installed one.
     updating: bool,
     startup: bool,
@@ -668,6 +1028,8 @@ fn show_where(dialog: HWND, dir: &Path, installed: bool) {
         tr!("It's installed here, so it updates in place.")
     } else if dir.join("dock.toml").is_file() {
         tr!("Your dock already in this folder will be used.")
+    } else if kept_by_onedrive(dir) {
+        tr!("OneDrive keeps this folder: have it always keep these files on this PC.")
     } else {
         ""
     };
@@ -678,11 +1040,11 @@ fn show_where(dialog: HWND, dir: &Path, installed: bool) {
 /// shows how far it is.
 fn start_install(dialog: HWND) {
     let startup = unsafe { IsDlgButtonChecked(dialog, IDC_CHOICE) } == BST_CHECKED.0;
-    let Some(dir) = SETUP.with(|s| {
+    let Some((dir, moving)) = SETUP.with(|s| {
         let mut s = s.borrow_mut();
         (s.busy, s.target, s.shown, s.startup) = (true, 0, 0, startup);
         (s.steps, s.said) = (Vec::new(), None);
-        s.dir.clone()
+        s.dir.clone().map(|dir| (dir, s.moving.clone()))
     }) else {
         return;
     };
@@ -704,10 +1066,14 @@ fn start_install(dialog: HWND) {
         let post = |message: u32, value: usize| unsafe {
             let _ = PostMessageW(Some(HWND(window as *mut c_void)), message, WPARAM(value), LPARAM(0));
         };
-        let result = install(Options { quiet: false, start: true, startup: Some(startup) }, &dir, &|step| {
-            post(WM_APP_STEP, Step::ALL.iter().position(|s| *s == step).unwrap_or(0));
-        });
-        if let Err(e) = &result {
+        let options = Options { quiet: false, start: true, startup: Some(startup), dir: None };
+        let progress = |step| post(WM_APP_STEP, Step::ALL.iter().position(|s| *s == step).unwrap_or(0));
+        let result = match &moving {
+            Some(old) => move_install(&options, old, &dir, &progress),
+            None => install(options, &dir, &progress),
+        };
+        // (A move that failed already said so in the old folder, the one still in use.)
+        if let (Err(e), None) = (&result, &moving) {
             log(&dir, &format!("failed: {e}"));
         }
         if let Ok(mut slot) = FINISHED.lock() {
@@ -722,17 +1088,13 @@ fn install_failed(dialog: HWND, why: &str) {
     unsafe {
         let _ = KillTimer(Some(dialog), TIMER_BAR);
     }
-    let installed = SETUP.with(|s| {
-        let mut s = s.borrow_mut();
-        s.busy = false;
-        s.installed
-    });
+    SETUP.with(|s| s.borrow_mut().busy = false);
     show(dialog, IDC_PROGRESS, false);
     set_text(dialog, IDC_STATUS, why);
-    for id in [IDOK.0, IDCANCEL.0, IDC_CHOICE] {
+    // (Change... too: a folder can be chosen whether it's installed or not, to move it.)
+    for id in [IDOK.0, IDCANCEL.0, IDC_CHOICE, IDC_CHANGE] {
         enable(dialog, id, true);
     }
-    enable(dialog, IDC_CHANGE, !installed);
 }
 
 /// What the Done page says: where the dock is, and how to bring it out.
@@ -754,10 +1116,10 @@ fn done_texts(updating: bool, startup: bool, edge: crate::config::Edge) -> (&'st
 }
 
 fn show_done(dialog: HWND) {
-    let (updating, startup) = SETUP.with(|s| {
+    let (updating, startup, moved) = SETUP.with(|s| {
         let mut s = s.borrow_mut();
         (s.done, s.busy) = (true, false);
-        (s.updating, s.startup)
+        (s.updating, s.startup, s.moving.is_some())
     });
     for id in [IDC_WHERE_LABEL, IDC_WHERE, IDC_CHANGE, IDC_WHERE_NOTE, IDC_CHOICE, IDC_PROGRESS, IDCANCEL.0] {
         show(dialog, id, false);
@@ -766,6 +1128,7 @@ fn show_done(dialog: HWND) {
     let dir = SETUP.with(|s| s.borrow().dir.clone());
     let edge = dir.and_then(|dir| crate::config::load(&dir.join("dock.toml")).ok()).map_or(crate::config::Edge::Top, |parsed| parsed.config.dock.edge);
     let (heading, text) = done_texts(updating, startup, edge);
+    let heading = if moved { tr!("Desktop Dock has moved") } else { heading };
     set_text(dialog, IDC_HEADING, heading);
     set_text(dialog, IDC_TEXT, text);
     set_text(dialog, IDC_STATUS, "");
@@ -878,9 +1241,10 @@ pub fn run_setup_window() -> i32 {
                 if let Some(dir) = &dir {
                     show_where(dialog, dir, installed.is_some());
                 }
-                enable(dialog, IDC_CHANGE, installed.is_none());
+                // (Installed, Change... moves it: see `move_install`.)
+                let installed_dir = installed.is_some().then(|| dir.clone()).flatten();
                 SETUP.with(|s| {
-                    *s.borrow_mut() = SetupState { dir, installed: installed.is_some(), updating, startup, ..SetupState::default() }
+                    *s.borrow_mut() = SetupState { dir, installed_dir, button, updating, startup, ..SetupState::default() }
                 });
                 // Enter installs (the first button would otherwise be Change...).
                 unsafe {
@@ -910,10 +1274,29 @@ pub fn run_setup_window() -> i32 {
                     let current = SETUP.with(|s| s.borrow().dir.clone());
                     let start = current.as_deref().and_then(Path::parent).map(Path::to_path_buf);
                     if let Some(picked) = pickers::choose_install_folder(Some(dialog), start.as_deref()) {
+                        let (installed_dir, button) = SETUP.with(|s| (s.borrow().installed_dir.clone(), s.borrow().button));
                         match install_dir_in(Path::new(&picked)) {
+                            // Installed elsewhere: it moves there, into an empty folder.
+                            Ok(dir) if installed_dir.as_ref().is_some_and(|old| !same_path(old, &dir)) => {
+                                if std::fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_some()) {
+                                    set_text(dialog, IDC_WHERE_NOTE, tr!("That folder isn't empty. Choose an empty one to move Desktop Dock to."));
+                                } else {
+                                    set_text(dialog, IDC_WHERE, &dir.display().to_string());
+                                    set_text(dialog, IDC_WHERE_NOTE, tr!("Desktop Dock and your dock will move here; the old folder is tidied away."));
+                                    set_text(dialog, IDOK.0, trc!("setup", "Move"));
+                                    SETUP.with(|s| {
+                                        let mut s = s.borrow_mut();
+                                        (s.dir, s.moving) = (Some(dir), installed_dir);
+                                    });
+                                }
+                            }
                             Ok(dir) => {
-                                show_where(dialog, &dir, false);
-                                SETUP.with(|s| s.borrow_mut().dir = Some(dir));
+                                show_where(dialog, &dir, installed_dir.is_some());
+                                set_text(dialog, IDOK.0, button);
+                                SETUP.with(|s| {
+                                    let mut s = s.borrow_mut();
+                                    (s.dir, s.moving) = (Some(dir), None);
+                                });
                             }
                             Err(why) => set_text(dialog, IDC_WHERE_NOTE, &why),
                         }
@@ -965,8 +1348,34 @@ pub fn run_setup_window() -> i32 {
 /// `--install [--quiet]`: installs with no window (or with a message if it fails and isn't quiet),
 /// where it's installed already or else in the usual place.
 pub fn run_install(options: Options) -> i32 {
-    let Some(dir) = install_dir() else { return 1 };
-    match install(options, &dir, &|_| {}) {
+    // --dir: checked as Change... checks it. A folder it can't use is said in the temporary
+    // folder's desktop-dock-setup.log (there's no install folder to keep a log in).
+    let chosen = match &options.dir {
+        Some(picked) => match install_dir_in(picked) {
+            Ok(dir) => Some(dir),
+            Err(why) => {
+                let note = std::env::temp_dir().join("desktop-dock-setup.log");
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(note) {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{} can't install in {}: {why}", stamp(), picked.display());
+                }
+                if !options.quiet {
+                    system::message_box(&why, tr!("Desktop Dock setup"), MB_ICONINFORMATION | MB_OK);
+                }
+                return 3;
+            }
+        },
+        None => None,
+    };
+    let installed = recorded_install_dir();
+    let Some(dir) = chosen.clone().or_else(install_dir) else { return 1 };
+    let result = match &installed {
+        Some(old) if chosen.is_some() && !same_path(old, &dir) => move_install(&options, old, &dir, &|_| {}),
+        _ => install(options.clone(), &dir, &|_| {}),
+    };
+    // (A move that failed left everything where it was.)
+    let dir = if result.is_err() { installed.unwrap_or(dir) } else { dir };
+    match result {
         Ok(()) => 0,
         Err(e) => {
             if options.quiet {
@@ -982,6 +1391,39 @@ pub fn run_install(options: Options) -> i32 {
             1
         }
     }
+}
+
+/// Removing the program it runs from: a running exe can't be deleted, only moved aside into the
+/// temporary folder, and only within one drive. Installed on another drive, a copy of itself in
+/// the temporary folder does the uninstall, with the same arguments, and this one ends so its
+/// exe can go. Some(exit code) when it handed over; None when this one does it itself.
+fn hand_to_temporary_copy() -> Option<i32> {
+    let me = std::env::current_exe().ok()?;
+    let installed = install_dir()?.join("desktop-dock.exe");
+    let temp = std::env::temp_dir();
+    if !same_path(&me, &installed) || same_drive(&me, &temp) {
+        return None;
+    }
+    let folder = temp.join(format!("desktop-dock-uninstall-{}", stamp()));
+    let copy = folder.join("desktop-dock.exe");
+    std::fs::create_dir_all(&folder).and_then(|()| std::fs::copy(&me, &copy)).ok()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::Command::new(&copy).args(&args).current_dir(&temp).spawn().ok()?;
+    log(installed.parent()?, "removing from another drive: handed to a copy in the temporary folder");
+    Some(0)
+}
+
+/// Both paths on the same drive (letters in any case, with or without `\\?\`).
+fn same_drive(a: &Path, b: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let drive = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => Some(match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => (letter as char).to_ascii_lowercase().to_string(),
+            _ => prefix.as_os_str().to_string_lossy().to_lowercase(),
+        }),
+        _ => None,
+    };
+    drive(a).is_some() && drive(a) == drive(b)
 }
 
 /// `--uninstall`: asks first (unless quiet), then removes Desktop Dock.
@@ -1015,6 +1457,9 @@ pub fn run_uninstall(quiet: bool, remove_dock: bool) -> i32 {
             _ => 0,
         }
     }
+    if let Some(code) = hand_to_temporary_copy() {
+        return code;
+    }
     let mut remove_dock = remove_dock;
     if !quiet {
         let answer = unsafe {
@@ -1030,8 +1475,9 @@ pub fn run_uninstall(quiet: bool, remove_dock: bool) -> i32 {
         Ok(left) => {
             if !quiet {
                 let message = match left {
-                    Some(dir) => tr!("Desktop Dock has been removed. Your dock is kept in {folder}, so installing again brings it back.", folder = dir.display()),
-                    None => tr!("Desktop Dock has been removed.").to_string(),
+                    Left::Dock(dir) => tr!("Desktop Dock has been removed. Your dock is kept in {folder}, so installing again brings it back.", folder = dir.display()),
+                    Left::Others(dir) => tr!("Desktop Dock has been removed. The other files in {folder} weren't Desktop Dock's, so they're left as they were.", folder = dir.display()),
+                    Left::Nothing => tr!("Desktop Dock has been removed.").to_string(),
                 };
                 system::message_box(&message, "Desktop Dock", MB_ICONINFORMATION | MB_OK);
             }
@@ -1067,11 +1513,16 @@ mod tests {
         // Explicit flags win wherever it is (a script may install a development build).
         assert_eq!(
             role(&args(&["--install", "--quiet", "--no-start"]), download, Some(install), false, true),
-            Role::Install(Options { quiet: true, start: false, startup: Some(true) })
+            Role::Install(Options { quiet: true, start: false, startup: Some(true), dir: None })
         );
         assert_eq!(
             role(&args(&["--install", "--no-startup"]), download, Some(install), false, false),
-            Role::Install(Options { quiet: false, start: true, startup: None })
+            Role::Install(Options { quiet: false, start: true, startup: None, dir: None })
+        );
+        // --dir names where it goes (the folder after it, spaces and all, as one argument).
+        assert_eq!(
+            role(&args(&["--install", "--quiet", "--dir", r"D:\My Apps"]), download, Some(install), false, false),
+            Role::Install(Options { quiet: true, start: true, startup: Some(true), dir: Some(PathBuf::from(r"D:\My Apps")) })
         );
         assert_eq!(role(&args(&["--uninstall"]), &installed, Some(install), false, false), Role::Uninstall { quiet: false, remove_dock: false });
         assert_eq!(
@@ -1127,6 +1578,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&picked);
         // Another computer: said plainly.
         assert!(install_dir_in(Path::new(r"\\nas\apps")).unwrap_err().contains("another computer"));
+    }
+
+    #[test]
+    fn removing_it_takes_only_what_desktop_dock_made() {
+        // (A folder named "Desktop Dock" is used as it is when chosen: see `install_dir_in`.)
+        let picked = std::env::temp_dir().join(format!("dd-setup-own-{}", std::process::id()));
+        let dir = picked.join("Desktop Dock");
+        let _ = std::fs::remove_dir_all(&picked);
+        let make = |path: &str| {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        };
+        let program = ["desktop-dock.exe", "desktop-dock.exe.new", "desktop-dock.exe.new.42-1.tmp", "desktop-dock.old-20261117.exe", "setup.log", r"cache\icons\a.bgra", r"logs\dock.log", r"updates\status.toml"];
+        let dock = ["dock.toml", "dock.toml.42-2.tmp", "removed.toml", r"backups\recent\12-00-00.toml", r"shortcuts\Notes.lnk"];
+        let theirs = ["my-notes.txt", r"My Pictures\photo.jpg", "dock.toml.txt"];
+        for path in program.iter().chain(&dock).chain(&theirs) {
+            make(path);
+        }
+        let there = |path: &str| dir.join(path).exists();
+        // Files of someone else's: not a folder to install into.
+        assert!(!holds_only_ours(&dir));
+        assert!(install_dir_in(&dir).is_err_and(|why| why.contains("other files")), "a folder holding other files is refused");
+        // The program goes, the dock stays, and so does everything else.
+        remove_own(&dir, false);
+        assert!(program.iter().all(|path| !there(path)), "the program and its working files");
+        assert!(dock.iter().filter(|path| !path.ends_with(".tmp")).all(|path| there(path)), "your dock is kept");
+        assert!(theirs.iter().all(|path| there(path)), "files that aren't Desktop Dock's are never touched");
+        // With the dock: still only Desktop Dock's, and the folder stays for what's left in it.
+        remove_own(&dir, true);
+        assert!(dock.iter().all(|path| !there(path)), "your dock, when asked for");
+        assert!(theirs.iter().all(|path| there(path)) && dir.is_dir());
+        // Only Desktop Dock's things in it: fine to install into, and removed whole.
+        for path in theirs {
+            let _ = std::fs::remove_dir_all(dir.join(path)).or_else(|_| std::fs::remove_file(dir.join(path)));
+        }
+        let _ = std::fs::remove_dir(dir.join("My Pictures"));
+        make("dock.toml");
+        make(r"backups\daily\2026-11-16.toml");
+        assert!(holds_only_ours(&dir));
+        remove_own(&dir, true);
+        assert!(!dir.exists(), "nothing else in it: the folder goes too");
+        assert!(holds_only_ours(&dir), "no folder yet: nothing in the way");
+        let _ = std::fs::remove_dir_all(&picked);
+    }
+
+    #[test]
+    fn moving_takes_along_your_files_the_dock_names_and_checks_every_copy() {
+        let old = std::env::temp_dir().join(format!("dd-setup-move-{}", std::process::id()));
+        let new = std::env::temp_dir().join(format!("dd-setup-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+        for path in [r"Tools\tool.exe", r"Icons\star.ico", r"Kit\readme.txt", r"shortcuts\Notes.lnk", "loose.txt"] {
+            let path = old.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        let elsewhere = std::env::temp_dir().join("dd-setup-elsewhere.exe");
+        let dock = format!(
+            "version = 1\n\n[[item]]\nname = 'Tool'\ntarget = 'Tools\\tool.exe'\nicon = 'Icons\\star.ico,0'\n\n[[item]]\nname = 'Notes'\ntarget = 'shortcuts\\Notes.lnk'\n\n\
+             [[item]]\nname = 'Elsewhere'\ntarget = '{}'\n\n[[item]]\nname = 'Kit'\nkind = 'group'\n  [[item.items]]\n  name = 'Readme'\n  target = 'Kit\\readme.txt'\n",
+            elsewhere.display()
+        );
+        std::fs::write(old.join("dock.toml"), dock).unwrap();
+        // Named by a path in the folder, and not Desktop Dock's own (shortcuts\ goes anyway): these.
+        let mut found = files_the_dock_names(&old);
+        found.sort();
+        assert_eq!(found, vec![old.join(r"Icons\star.ico"), old.join(r"Kit\readme.txt"), old.join(r"Tools\tool.exe")], "not loose.txt (not named), nor what's elsewhere");
+        // A folder copied whole, each file checked; what was made is listed, for taking away.
+        let mut made = Vec::new();
+        copy_checked(&old.join("Kit"), &new.join("Kit"), &mut made).unwrap();
+        assert_eq!(std::fs::read(new.join(r"Kit\readme.txt")).unwrap(), b"x");
+        assert_eq!(made, vec![new.join("Kit"), new.join(r"Kit\readme.txt")]);
+        // Something that can't be read: it says which, and nothing more is made.
+        assert!(copy_checked(&old.join("missing.txt"), &new.join("missing.txt"), &mut made).is_err_and(|why| why.contains("missing.txt")));
+        assert_eq!(made.len(), 2);
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+    }
+
+    #[test]
+    fn folders_and_drives_compare_as_windows_does() {
+        assert!(starts_with_folder(Path::new(r"C:\Program Files\Desktop Dock"), Path::new(r"c:\program files")));
+        assert!(starts_with_folder(Path::new(r"C:\Program Files"), Path::new(r"C:\Program Files\")));
+        assert!(!starts_with_folder(Path::new(r"C:\Program Files Mine\Desktop Dock"), Path::new(r"C:\Program Files")), "a folder beside it, not in it");
+        assert!(!starts_with_folder(Path::new(r"C:\Tools"), Path::new("")));
+        assert!(same_drive(Path::new(r"C:\Users\a\AppData\Local\Temp"), Path::new(r"c:\Apps\Desktop Dock\desktop-dock.exe")));
+        assert!(same_drive(Path::new(r"\\?\C:\Apps"), Path::new(r"C:\Temp")));
+        assert!(!same_drive(Path::new(r"D:\Apps\Desktop Dock\desktop-dock.exe"), Path::new(r"C:\Users\a\AppData\Local\Temp")));
+        assert!(!same_drive(Path::new("relative"), Path::new("relative")), "no drive: never taken as the same");
     }
 
     #[test]

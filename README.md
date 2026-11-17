@@ -17,7 +17,7 @@ A lightweight dock for Windows 11. It stays hidden at the top of your screen (or
 - **Easy switch from RocketDock:** import your existing RocketDock setup, icons and all.
 - **Your look:** a light or dark panel, clear glass, frosted, or a floating capsule that follows Windows' light or dark mode, with an optional hover glow in your accent colour. Names can show for the icon you point at, for every icon, or not at all.
 - **In your language:** English, Deutsch, Français, Español, Português (Brasil), Русский, 中文(简体) and 日本語. It follows Windows' display language, or choose one in Dock settings > Look > Language. The translations are new: if something reads oddly, corrections are welcome ([how](lang/README.md)).
-- **Lightweight:** uses about 9 MB of memory and collects no data. It goes online only to check for a new version when you ask (Dock settings > About), or once a day if you tick that box, and then it only asks GitHub which version is the newest.
+- **Lightweight:** uses about 9 MB of memory and collects no data. It goes online only to check for a new version when you ask (Dock settings > About), or once a day if you tick that box, and then it only asks GitHub which version is the newest; Update now downloads it from there. It sends nothing about you or your PC, and its log stays on your PC.
 
 <p align="center">
   <img src="docs/images/group.png" alt="A group's pop-up" width="49%">
@@ -37,13 +37,20 @@ A lightweight dock for Windows 11. It stays hidden at the top of your screen (or
 
 The program isn't digitally signed (a code-signing certificate costs money every year), so Windows shows a warning the first time you run it. If you see "Unknown Publisher", click **Run**. If you see "Windows protected your PC", click **More info**, then **Run anyway**.
 
-Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or another folder you choose with **Change…**). It adds a Start menu shortcut and an entry in Settings > Apps > Installed apps, and starts with Windows unless you untick that option. Starting with Windows is a sign-in task of your own in Task Scheduler, so the dock appears within seconds of signing in instead of waiting behind other startup apps; turn it on or off in Dock settings > Behaviour.
+Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\Desktop Dock` (or another folder you choose with **Change…**). To move it later, run the `desktop-dock.exe` you downloaded again (the one from the zip: the installed copy just opens your dock), choose another folder with **Change…**, then click **Move**: the program and your dock move there together, and Start with Windows, the Start menu and icons you pinned to the taskbar or desktop follow. It adds a Start menu shortcut and an entry in Settings > Apps > Installed apps, and starts with Windows unless you untick that option. Starting with Windows is a sign-in task of your own in Task Scheduler, so the dock appears within seconds of signing in instead of waiting behind other startup apps; turn it on or off in Dock settings > Behaviour.
 
 ![Setup](docs/images/setup.png)
 
 - **Updating:** Dock settings > About > **Check now**, then **Update now** (from 1.1). Or run the newer `desktop-dock.exe` and click **Update**. Either way, your icons and settings are kept.
 - **If you closed the dock:** start Desktop Dock from the Start menu. Starting it while it's already running opens its settings.
-- **Uninstalling:** Settings > Apps > Installed apps > Desktop Dock > Uninstall. Your dock is kept in case you reinstall, unless you tick *Also remove my dock*.
+- **Uninstalling:** Settings > Apps > Installed apps > Desktop Dock > Uninstall. Your dock is kept in case you reinstall, unless you tick *Also remove my dock*. Only Desktop Dock's own files are removed: anything else you put in its folder stays. An icon you pinned to the taskbar yourself stays too; unpin it with a right-click.
+- **Installing from a script:** `desktop-dock.exe --install --quiet` installs (or updates) with no window.
+  - `--dir "D:\Apps"` puts it in a Desktop Dock folder there, checked as **Change…** checks a folder, and moves it there if it's installed elsewhere.
+  - `--no-start` leaves the dock closed afterwards.
+  - `--no-startup` leaves Start with Windows as it was.
+  - `--uninstall --quiet` removes it, keeping your dock; add `--remove-dock` to remove that too.
+
+  It has no console. To wait for it and read its exit code, use `start /wait` in Command Prompt or `Start-Process -Wait -PassThru` in PowerShell. 0 means it worked, and 3 means it can't use that folder (the reason is in `%TEMP%\desktop-dock-setup.log`).
 
 ## How to use it
 

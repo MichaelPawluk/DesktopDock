@@ -152,8 +152,8 @@ impl Store {
         self.config.parent().unwrap_or(Path::new("."))
     }
 
-    /// Applies `edit` to the file as it is on disk now, then saves it safely.
-    #[allow(dead_code)] // kept for edits that don't need Undo
+    /// Applies `edit` to the file as it is on disk now, then saves it safely (for changes with no
+    /// Undo, such as Lock icons).
     pub fn edit(&self, edit: impl FnOnce(&mut DocumentMut) -> Result<(), String>) -> Result<(), String> {
         self.change(edit).map(|_| ())
     }
@@ -359,7 +359,7 @@ pub fn open(store: &Store) -> Opened {
                 log_warn!("dock.toml: {warning}");
             }
             if parsed.read_only {
-                let notice = tr!("{file} was saved by a newer version of Desktop Dock.\n\nIt's being used as it is, and won't be saved over.", file = path.display());
+                let notice = tr!("Your dock's file was saved by a newer version of Desktop Dock.\n\nIt's being used as it is, and won't be saved over.").to_string();
                 return Opened { parsed, mode: Mode::ReadOnly, notice: Some(notice), unreadable };
             }
             let (text, parsed) = if parsed.needs_migration { migrate(store, text, parsed) } else { (text, parsed) };
@@ -372,19 +372,19 @@ pub fn open(store: &Store) -> Opened {
             // A whole text for each case (held or damaged, a working version or none).
             let notice = match (unreadable, good.is_some()) {
                 (true, true) => tr!(
-                    "Your dock (dock.toml) couldn't be opened:\n\n{error}\n\nRunning your last working setup meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
+                    "Your dock's file couldn't be opened:\n\n{error}\n\nRunning your last working setup meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
                     error = error
                 ),
                 (true, false) => tr!(
-                    "Your dock (dock.toml) couldn't be opened:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
+                    "Your dock's file couldn't be opened:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. The dock keeps trying, and switches to it as soon as it can be read.",
                     error = error
                 ),
                 (false, true) => tr!(
-                    "dock.toml has an error:\n\n{error}\n\nRunning your last working setup meanwhile. Fix the file and save it (the dock picks it up), or right-click the dock > Restore last working version.",
+                    "Your dock's file has an error:\n\n{error}\n\nRunning your last working setup meanwhile. Fix the file and save it (the dock picks it up), or right-click the dock > Restore last working version.",
                     error = error
                 ),
                 (false, false) => tr!(
-                    "dock.toml has an error:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. Fix the file and save it (the dock picks it up).",
+                    "Your dock's file has an error:\n\n{error}\n\nThere's no earlier working version, so the dock is empty meanwhile. Fix the file and save it (the dock picks it up).",
                     error = error
                 ),
             };

@@ -194,7 +194,7 @@ const GROUP_UNGROUP: usize = 3;
 /// Group… > Move to (group): one entry per group, from here.
 const GROUP_MOVE: usize = 100;
 /// What Group… > New group calls it (rename it in its properties).
-const NEW_GROUP_NAME: &str = "New group";
+const NEW_GROUP_NAME: &str = n!("New group");
 
 /// The settings window's sections, in the order listed (their names in English, shown in the
 /// language in use); each is a page beside the list. The number is its symbol in Windows'
@@ -255,8 +255,8 @@ const SLIDERS: [Slider; 11] = [
     Slider { id: 1303, key: "zoom_size", what: n!("Zoom size"), min: 16.0, max: 256.0, step: 1.0, unit: Unit::Pixels, heavy: true },
     Slider { id: 1305, key: "spacing", what: n!("Spacing"), min: 0.0, max: 64.0, step: 1.0, unit: Unit::Pixels, heavy: false },
     Slider { id: IDC_LABEL_SIZE, key: "label_size", what: n!("Name size"), min: 8.0, max: 24.0, step: 0.5, unit: Unit::Pixels, heavy: false },
-    Slider { id: 1310, key: "background_opacity", what: n!("Background"), min: 0.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
-    Slider { id: 1312, key: "icon_opacity", what: n!("Icons"), min: 10.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
+    Slider { id: 1310, key: "background_opacity", what: n!("Background opacity"), min: 0.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
+    Slider { id: 1312, key: "icon_opacity", what: n!("Icon opacity"), min: 10.0, max: 100.0, step: 1.0, unit: Unit::Percent, heavy: false },
     Slider { id: 1401, key: "popup_delay_ms", what: n!("Show after"), min: 0.0, max: 2000.0, step: 50.0, unit: Unit::Milliseconds, heavy: false },
     Slider { id: 1403, key: "hide_delay_ms", what: n!("Hide after"), min: 0.0, max: 2000.0, step: 50.0, unit: Unit::Milliseconds, heavy: false },
     Slider { id: 1405, key: "slide_in_ms", what: n!("Slide in"), min: 0.0, max: 1000.0, step: 25.0, unit: Unit::Milliseconds, heavy: false },
@@ -1194,7 +1194,8 @@ fn answer(ask: Ask) {
         }
         Ask::Icon(spot, expect, stored, current, program) => {
             // Each icon clicked is saved, so the dock shows it; Cancel puts the stored one back.
-            let title = tr!("Choose an icon for {name}", name = expect);
+            let shown = with_settings(|s| s.shown(spot)).unwrap_or_else(|| expect.clone());
+            let title = tr!("Choose an icon for {name}", name = shown);
             let request = iconpicker::Request { owner: window, title, program, current };
             let label = expect.clone();
             let kept = iconpicker::choose(request, move |icon| {
@@ -1213,7 +1214,8 @@ fn answer(ask: Ask) {
             if gap.child.is_none() {
                 entries.push((ADD_SEPARATOR, item(tr!("Separator"))));
                 if !has_bin {
-                    entries.push((ADD_BIN, item(tr!("Recycle Bin"))));
+                    // Windows' own name for it (and the new item's), as the dock's menu has it.
+                    entries.push((ADD_BIN, places::recycle_bin_name()));
                 }
             }
             // Windows items (This PC, Downloads, Settings…): into a group too.
@@ -1230,7 +1232,7 @@ fn answer(ask: Ask) {
                     vec![separator]
                 }
                 ADD_BIN => {
-                    let mut bin = ItemConfig::new("Recycle Bin", "");
+                    let mut bin = ItemConfig::new(places::recycle_bin_name(), "");
                     bin.kind = Kind::RecycleBin;
                     vec![bin]
                 }
@@ -1293,6 +1295,12 @@ impl Settings {
 
     fn label(&self, spot: Spot) -> Option<String> {
         self.at(spot).map(edit::label_of)
+    }
+
+    /// Its name as it's shown: one without a name of its own by its kind, in the language in use
+    /// (`label` is how dock.toml knows it, for finding it again).
+    fn shown(&self, spot: Spot) -> String {
+        self.at(spot).map(edit::shown_label_of).unwrap_or_default()
     }
 
     /// How many items share a list with `spot`: the dock's, or its group's.
@@ -1917,7 +1925,7 @@ impl Settings {
         enable(page, IDC_UP, place.is_some_and(|p| p > 0));
         enable(page, IDC_DOWN, place.is_some_and(|p| p + 1 < siblings));
         enable(page, IDC_GROUP, kind.is_some_and(|kind| kind != Kind::Separator));
-        let group_name = spot.and_then(|spot| spot.child.and(self.items.get(spot.index))).map(edit::label_of);
+        let group_name = spot.and_then(|spot| spot.child.and(self.items.get(spot.index))).map(edit::shown_label_of);
         let own_icon = match kind {
             Some(Kind::App | Kind::RecycleBin) if !item.icon.trim().is_empty() => Some(icon_from(&self.home, &item.icon)),
             _ => None,
@@ -2310,6 +2318,7 @@ impl Settings {
         let Some(spot) = self.selected else { return };
         let Some(expect) = self.label(spot) else { return };
         let group = spot.child.and(self.items.get(spot.index)).map(edit::label_of);
+        let shown = self.shown(spot);
         let result = self.store.change(|doc| edit::remove(doc, spot, &expect));
         self.reload_model();
         match result {
@@ -2317,15 +2326,16 @@ impl Settings {
                 let _ = self.removed.add(&table, spot.child.unwrap_or(spot.index), group.as_deref());
                 nudge_dock(true);
                 self.select(spot);
-                self.status(&tr!("Removed {name}. To get it back: Revert, or Recently removed > Put back.", name = expect));
+                self.status(&tr!("Removed {name}. To get it back: Revert, or Recently removed > Put back.", name = shown));
             }
-            Err(e) => self.status(&tr!("{name} wasn't removed: {error}", name = expect, error = e)),
+            Err(e) => self.status(&tr!("{name} wasn't removed: {error}", name = shown, error = e)),
         }
     }
 
     /// Moves the item at `from` to the gap `to` in the same list (in front of what's there now).
     fn move_to(&mut self, from: Spot, to: Spot, expect: &str) {
-        if self.change(&tr!("Moved {name}.", name = expect), |e| e, None, true, |doc| edit::move_item(doc, from, to, expect)) {
+        let shown = self.shown(from);
+        if self.change(&tr!("Moved {name}.", name = shown), |e| e, None, true, |doc| edit::move_item(doc, from, to, expect)) {
             let (old, new) = (from.child.unwrap_or(from.index), to.child.unwrap_or(to.index));
             let landed = if new > old { new - 1 } else { new };
             self.select(Spot { index: if from.child.is_some() { from.index } else { landed }, child: from.child.map(|_| landed) });
@@ -2369,7 +2379,7 @@ impl Settings {
         match (item.kind, spot.child) {
             (Kind::Group, None) => entries.push((GROUP_UNGROUP, tr!("Ungroup {name}", name = label))),
             (_, Some(_)) => {
-                let group = self.items.get(spot.index).map(edit::label_of).unwrap_or_default();
+                let group = self.items.get(spot.index).map(edit::shown_label_of).unwrap_or_default();
                 entries.push((GROUP_TAKE_OUT, tr!("Take {name} out of {group}", name = label, group = group)));
             }
             (_, None) => entries.push((GROUP_NEW, tr!("New group with {name}", name = label))),
@@ -2389,26 +2399,29 @@ impl Settings {
     fn group_action(&mut self, choice: usize) {
         let Some(spot) = self.selected else { return };
         let Some(expect) = self.label(spot) else { return };
+        let shown = self.shown(spot);
         match choice {
             GROUP_NEW => {
-                let done = tr!("New group with {name}.", name = expect);
-                if self.change(&done, |e| e, Some(NEW_GROUP_NAME.into()), true, |doc| edit::make_group(doc, spot.index, &expect, NEW_GROUP_NAME)) {
+                // (Named in the language in use, as the dock names a group it makes.)
+                let name = text::t(NEW_GROUP_NAME).to_string();
+                let done = tr!("New group with {name}.", name = shown);
+                if self.change(&done, |e| e, Some(name.clone()), true, |doc| edit::make_group(doc, spot.index, &expect, &name)) {
                     self.select(Spot::dock(spot.index));
-                    self.status(&tr!("New group with {name}. Type its name in Name.", name = expect));
+                    self.status(&tr!("New group with {name}. Type its name in Name.", name = shown));
                 }
             }
             GROUP_UNGROUP => {
-                self.change(&tr!("Ungrouped {name}.", name = expect), |e| e, None, true, |doc| edit::ungroup(doc, spot.index, &expect).map(|_| ()));
+                self.change(&tr!("Ungrouped {name}.", name = shown), |e| e, None, true, |doc| edit::ungroup(doc, spot.index, &expect).map(|_| ()));
             }
             GROUP_TAKE_OUT => {
-                let done = tr!("Took {name} out of the group.", name = expect);
+                let done = tr!("Took {name} out of the group.", name = shown);
                 self.change(&done, |e| e, None, true, |doc| edit::move_item(doc, spot, Spot::dock(spot.index + 1), &expect));
             }
             _ if choice >= GROUP_MOVE => {
                 let group = choice - GROUP_MOVE;
-                let name = self.items.get(group).map(edit::label_of).unwrap_or_default();
+                let name = self.items.get(group).map(edit::shown_label_of).unwrap_or_default();
                 let end = self.items.get(group).map_or(0, |g| g.items.len());
-                let done = tr!("Moved {name} to {group}.", name = expect, group = name);
+                let done = tr!("Moved {name} to {group}.", name = shown, group = name);
                 self.change(&done, |e| e, None, true, |doc| edit::move_item(doc, spot, Spot::in_group(group, end), &expect));
             }
             _ => {}
@@ -2427,7 +2440,7 @@ impl Settings {
         let rows: Vec<Vec<String>> = self
             .removed_list
             .iter()
-            .map(|entry| vec![entry.label.clone(), entry.removed_at.get(..16).unwrap_or(&entry.removed_at).to_string(), entry.was_in.clone().unwrap_or_else(|| tr!("Dock").into())])
+            .map(|entry| vec![entry.label.clone(), text::when(&entry.removed_at), entry.was_in.clone().unwrap_or_else(|| tr!("Dock").into())])
             .collect();
         fill_rows(list, &rows);
         let page = self.pages[SECTION_REMOVED];
@@ -2506,7 +2519,7 @@ impl Settings {
                     BackupKind::Pinned => kept_copy_kind(&backup.label).to_string(),
                 };
                 let count = config::read_text(&backup.path).ok().and_then(|text| item_count(&text)).map_or("?".to_string(), |n| n.to_string());
-                vec![if backup.when.is_empty() { "-".into() } else { backup.when.clone() }, kind, count]
+                vec![if backup.when.is_empty() { "-".into() } else { text::when_exactly(&backup.when) }, kind, count]
             })
             .collect();
         fill_rows(list, &rows);
