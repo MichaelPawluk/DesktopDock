@@ -29,6 +29,39 @@ if (-not $NoBuild) {
     finally { Pop-Location; Remove-Item Env:CARGO_ENCODED_RUSTFLAGS, Env:CARGO_PROFILE_RELEASE_DEBUG, Env:CARGO_PROFILE_RELEASE_STRIP -ErrorAction SilentlyContinue }
 }
 
+# The PE header's date and checksum. /Brepro stamps the date with a hash, which reads as any year
+# from 1970 to 2106 and sits oddly beside a checksum of 0. Here the date is the one written in
+# assets\build-date.txt (UTC; set it for each release), in the header and in each debug entry
+# that carries it, and the header gets its real checksum. Both depend only on that file and the
+# rest of the exe, so the same source still gives the same exe, byte for byte.
+function Set-PeDateAndChecksum([string]$path, [uint32]$stamp) {
+    $b = [IO.File]::ReadAllBytes($path)
+    $pe = [BitConverter]::ToInt32($b, 0x3C)
+    $sections = [BitConverter]::ToUInt16($b, $pe + 6)
+    $optionalSize = [BitConverter]::ToUInt16($b, $pe + 20)
+    $optional = $pe + 24
+    [BitConverter]::GetBytes($stamp).CopyTo($b, $pe + 8)
+    $debugRva = [BitConverter]::ToUInt32($b, $optional + 112 + 6 * 8)
+    $debugSize = [BitConverter]::ToUInt32($b, $optional + 112 + 6 * 8 + 4)
+    $debugAt = $null
+    for ($i = 0; $i -lt $sections; $i++) {
+        $s = $optional + $optionalSize + 40 * $i
+        $virtualAddress = [BitConverter]::ToUInt32($b, $s + 12)
+        $extent = [Math]::Max([BitConverter]::ToUInt32($b, $s + 8), [BitConverter]::ToUInt32($b, $s + 16))
+        if ($debugRva -ge $virtualAddress -and $debugRva -lt $virtualAddress + $extent) { $debugAt = $debugRva - $virtualAddress + [BitConverter]::ToUInt32($b, $s + 20) }
+    }
+    if ($debugSize -gt 0 -and $null -eq $debugAt) { throw 'The exe has a debug directory this script cannot find.' }
+    for ($e = 0; $e -lt [int]($debugSize / 28); $e++) { [BitConverter]::GetBytes($stamp).CopyTo($b, $debugAt + 28 * $e + 4) }
+    [IO.File]::WriteAllBytes($path, $b)
+    Add-Type -Namespace PeTool -Name Sum -MemberDefinition '[System.Runtime.InteropServices.DllImport("imagehlp.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint MapFileAndCheckSumW(string file, out uint headerSum, out uint checkSum);' -ErrorAction SilentlyContinue
+    [uint32]$was = 0; [uint32]$sum = 0
+    if ([PeTool.Sum]::MapFileAndCheckSumW($path, [ref]$was, [ref]$sum) -ne 0) { throw 'Windows could not work out the exe''s checksum.' }
+    [BitConverter]::GetBytes($sum).CopyTo($b, $optional + 64)
+    [IO.File]::WriteAllBytes($path, $b)
+}
+$buildDate = [DateTimeOffset]::Parse((Get-Content (Join-Path $root 'assets\build-date.txt') -Raw).Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+Set-PeDateAndChecksum $built ([uint32]$buildDate.ToUnixTimeSeconds())
+
 # Runs on a fresh Windows: no Visual C++ Redistributable needed (its runtime is built in).
 if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($built)) -match '(?i)(vcruntime|msvcp)1\d\d(_\d)?\.dll') {
     throw "The exe needs $($Matches[0]), which a fresh Windows doesn't have: build it with the C runtime built in (.cargo\config.toml)."

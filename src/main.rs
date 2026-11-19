@@ -146,6 +146,9 @@ fn main() {
         match arg.as_str() {
             "--child" => child = true,         // the real dock, started by the watchdog
             "--safe-mode" => safe_mode = true, // set by the watchdog after quick crashes
+            // The watchdog's process, so the About page can show its memory too (the dock puts it
+            // on its window, see dock::run).
+            "--watchdog-pid" => WATCHDOG_PID.store(args.next().and_then(|n| n.parse().ok()).unwrap_or(0), std::sync::atomic::Ordering::Relaxed),
             "--no-watchdog" => no_watchdog = true,
             "--quit" => quit = true, // asks a running dock to exit (for scripts)
             // Started by Windows at sign-in (system::STARTUP_FLAG): runs as usual; if the dock is
@@ -354,3 +357,6 @@ fn fatal(message: &str) -> ! {
 
 /// This process is the dock the watchdog started (`--child`).
 static RUNNING_AS_CHILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The watchdog that started this dock (`--watchdog-pid`), or 0.
+pub static WATCHDOG_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

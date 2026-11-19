@@ -6186,6 +6186,11 @@ fn create_window() -> Result<HWND> {
 pub fn run(opened: store::Opened, store: Store, home: Home, started: Instant, safe_mode: bool, first_run: bool) -> Result<()> {
     unsafe {
         let hwnd = create_window()?;
+        // Names the watchdog on the window, for the About page's memory figure.
+        let watchdog = crate::WATCHDOG_PID.load(std::sync::atomic::Ordering::Relaxed);
+        if watchdog != 0 {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetPropW(hwnd, system::WATCHDOG_PROP, Some(HANDLE(watchdog as usize as *mut std::ffi::c_void)));
+        }
 
         // A file that couldn't be read as the dock started is usually held for a moment by
         // another program: its notice waits, and is never shown if the file frees up soon.

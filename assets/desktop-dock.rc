@@ -15,6 +15,9 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
+      VALUE "CompanyName", "Michael Pawluk"
+      VALUE "LegalCopyright", "Copyright (c) 2026 Michael Pawluk. MIT licence."
+      VALUE "Comments", "Open source: https://github.com/MichaelPawluk/DesktopDock"
       VALUE "FileDescription", "Desktop Dock"
       VALUE "ProductName", "Desktop Dock"
       VALUE "FileVersion", VER_STRING

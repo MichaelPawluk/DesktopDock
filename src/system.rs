@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_CLOSE, WTS_CONSOLE_CONNECT,
     WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
 /// A message as people read it: Windows' error numbers ("(os error 32)", "(0x80070005)") are
 /// left out, as its own words already say what happened.
@@ -438,11 +438,11 @@ pub fn private_mb() -> f64 {
     if ok { counters.PrivateUsage as f64 / (1024.0 * 1024.0) } else { 0.0 }
 }
 
-/// For tests: this process's heaps (how many; MB handed out and MB committed) and its threads.
+/// For tests: this process's heaps (how many; MB handed out and MB committed). (The thread
+/// count a test wants comes from outside the process.)
 /// Allocated rising means something is kept; committed rising with allocated flat means the
 /// heap is holding freed space (fragmentation), not a leak.
 pub fn heap_and_threads() -> String {
-    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
     use windows::Win32::System::Memory::{GetProcessHeaps, HEAP_SUMMARY, HeapSummary};
     let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
     let mut heaps = [HANDLE::default(); 64];
@@ -459,21 +459,8 @@ pub fn heap_and_threads() -> String {
             }
         }
     }
-    let me = std::process::id();
-    let mut threads = 0;
-    unsafe {
-        if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) {
-            let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
-            let mut more = Thread32First(snapshot, &mut entry).is_ok();
-            while more {
-                threads += usize::from(entry.th32OwnerProcessID == me);
-                more = Thread32Next(snapshot, &mut entry).is_ok();
-            }
-            let _ = CloseHandle(snapshot);
-        }
-    }
     format!(
-        "heaps={count} heap_alloc_mb={:.2} heap_commit_mb={:.2} main_heap_alloc_mb={:.2} main_heap_commit_mb={:.2} threads={threads}",
+        "heaps={count} heap_alloc_mb={:.2} heap_commit_mb={:.2} main_heap_alloc_mb={:.2} main_heap_commit_mb={:.2}",
         mb(allocated), mb(committed), mb(process_allocated), mb(process_committed)
     )
 }
@@ -513,42 +500,41 @@ pub fn give_back_memory() {
 /// What the running dock is using now, in MB of private memory: the dock, and its watchdog if
 /// there is one (for the settings window's About page). None if no dock is running.
 pub fn dock_memory() -> Option<(f64, Option<f64>)> {
-    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ};
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
-    let private_of = |pid: u32| -> Option<f64> {
-        unsafe {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
-            let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
-            let ok = GetProcessMemoryInfo(process, &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, counters.cb).is_ok();
-            let _ = CloseHandle(process);
-            ok.then_some(counters.PrivateUsage as f64 / (1024.0 * 1024.0))
-        }
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetPropW, GetWindowThreadProcessId};
     unsafe {
         let dock = FindWindowW(w!("DesktopDock"), w!("Desktop Dock")).ok()?;
         let mut pid = 0u32;
         GetWindowThreadProcessId(dock, Some(&mut pid));
-        let mine = private_of(pid)?;
-        // Its watchdog: the desktop-dock.exe that started it.
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok();
-        let mut processes = Vec::new();
-        if let Some(snapshot) = snapshot {
-            let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
-            while more {
-                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
-                processes.push((entry.th32ProcessID, entry.th32ParentProcessID, String::from_utf16_lossy(&entry.szExeFile[..len])));
-                more = Process32NextW(snapshot, &mut entry).is_ok();
-            }
-            let _ = CloseHandle(snapshot);
-        }
-        let parent = processes.iter().find(|(id, _, _)| *id == pid).map(|(_, parent, _)| *parent);
-        let watchdog = processes
-            .iter()
-            .find(|(id, _, exe)| Some(*id) == parent && exe.eq_ignore_ascii_case("desktop-dock.exe"))
-            .and_then(|(id, _, _)| private_of(*id));
+        let mine = process_private_mb(pid, false)?;
+        // Its watchdog: the desktop-dock.exe that started it, which the dock names on its window.
+        let watchdog_pid = GetPropW(dock, WATCHDOG_PROP).0 as usize as u32;
+        let watchdog = (watchdog_pid != 0).then(|| process_private_mb(watchdog_pid, true)).flatten();
         Some((mine, watchdog))
+    }
+}
+
+/// The window property by which the dock tells which process started it (its watchdog).
+pub const WATCHDOG_PROP: PCWSTR = w!("DesktopDock.Watchdog");
+
+/// Private memory in MB of process `pid`, asking Windows for no more than the right to query
+/// it. With `must_be_dock`, only if that process is a desktop-dock.exe.
+fn process_private_mb(pid: u32, must_be_dock: bool) -> Option<f64> {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut is_dock = !must_be_dock;
+        if must_be_dock {
+            let mut name = [0u16; 520];
+            let mut len = name.len() as u32;
+            if QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(name.as_mut_ptr()), &mut len).is_ok() {
+                let path = String::from_utf16_lossy(&name[..len as usize]);
+                is_dock = path.rsplit('\\').next().is_some_and(|file| file.eq_ignore_ascii_case("desktop-dock.exe"));
+            }
+        }
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let ok = is_dock && GetProcessMemoryInfo(process, &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, counters.cb).is_ok();
+        let _ = CloseHandle(process);
+        ok.then_some(counters.PrivateUsage as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -1197,6 +1183,15 @@ mod tests {
         assert_eq!(plain("Couldn't open it: Access is denied. (0x80070005)."), "Couldn't open it: Access is denied.");
         assert_eq!(plain("Icon size (in pixels) stays (os error x) as is"), "Icon size (in pixels) stays (os error x) as is");
         assert_eq!(plain("unclosed (os error 5"), "unclosed (os error 5");
+    }
+
+    #[test]
+    fn a_process_memory_is_read_with_only_the_right_to_query_it() {
+        // The About page asks Windows for no more than PROCESS_QUERY_LIMITED_INFORMATION.
+        let mb = process_private_mb(std::process::id(), false).expect("memory of a process, without the right to read its memory");
+        assert!(mb > 0.5 && mb < 4096.0, "{mb} MB");
+        // A watchdog must be a desktop-dock.exe: this is the test program.
+        assert_eq!(process_private_mb(std::process::id(), true), None);
     }
 
     // A window for the fullscreen rules: an ordinary one unless changed.

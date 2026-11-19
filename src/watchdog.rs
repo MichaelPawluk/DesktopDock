@@ -9,7 +9,7 @@
 //! A dock that stops responding is treated as a crash: every 15 s the watchdog asks the dock's
 //! window for a sign of life (WM_NULL, which is answered even while a menu, a message box or a
 //! drag is open). No answer three times in a row (within a minute), and the dock is ended and
-//! restarted. Not while a debugger holds it, and not straight after the PC wakes up.
+//! restarted. Not straight after the PC wakes up. (To debug the dock, start it with `--no-watchdog`.)
 //!
 //! A dock that couldn't start (its window or drawing not made, say just after waking) says why in
 //! the log and is tried again after a pause, under the same crash rules.
@@ -20,7 +20,6 @@ use std::os::windows::io::AsRawHandle;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_TIMEOUT, WPARAM};
-use windows::Win32::System::Diagnostics::Debug::CheckRemoteDebuggerPresent;
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL};
@@ -101,7 +100,7 @@ impl Liveness {
         self.misses >= HUNG_AFTER
     }
 
-    /// Starts counting again (after the PC slept, or while a debugger holds the dock).
+    /// Starts counting again (after the PC slept).
     pub fn reset(&mut self) {
         self.misses = 0;
     }
@@ -116,7 +115,7 @@ pub fn run(args: &[String], home: &std::path::Path) -> ! {
     loop {
         let started = Instant::now();
         let mut command = Command::new(&exe);
-        command.args(args).arg("--child");
+        command.args(args).arg("--child").arg("--watchdog-pid").arg(std::process::id().to_string());
         if safe_mode {
             command.arg("--safe-mode");
         }
@@ -188,7 +187,7 @@ fn watch(child: &mut Child, started: Instant) -> u32 {
         if slept {
             log_info!("the PC was asleep or paused (about {} s); the dock gets time to catch up", gap / 1000);
         }
-        if slept || debugger_attached(process) {
+        if slept {
             liveness.reset();
             continue;
         }
@@ -249,11 +248,6 @@ fn dock_window(pid: u32) -> Option<HWND> {
         let _ = EnumWindows(Some(each), LPARAM(&mut search as *mut Search as isize));
     }
     search.found
-}
-
-fn debugger_attached(process: HANDLE) -> bool {
-    let mut present = BOOL(0);
-    unsafe { CheckRemoteDebuggerPresent(process, &mut present) }.is_ok() && present.as_bool()
 }
 
 #[cfg(test)]
