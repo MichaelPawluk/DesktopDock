@@ -31,9 +31,12 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
 };
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::UI::Controls::IImageList;
 use windows::Win32::UI::Shell::{
-    ExtractIconExW, IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SHGSI_ICONLOCATION,
-    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_RECYCLER, SIID_RECYCLERFULL, SIIGBF_ICONONLY,
+    ExtractIconExW, IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SHFILEINFOW, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHGSI_ICONLOCATION, SHGetFileInfoW, SHGetImageList, SHGetStockIconInfo, SHIL_EXTRALARGE, SHIL_JUMBO,
+    SHSTOCKICONINFO, SIID_RECYCLER, SIID_RECYCLERFULL, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW};
 use windows::core::{Error, HSTRING, Interface, Result};
@@ -123,6 +126,9 @@ pub enum IconSource {
     /// Windows' own icon for a target: app, file, folder or shell location.
     Shell(String),
     RecycleBin { full: bool },
+    /// Windows' icon for a kind of file (".pdf"), for a folder (`folder::FOLDER_TYPE`), or for
+    /// a file with no extension (empty): it needs no look at any file.
+    FileType(String),
 }
 
 /// Splits `C:\x\imageres.dll,-109` into the file and the icon number; plain paths have none.
@@ -177,7 +183,7 @@ pub fn cache_key(sources: &[IconSource], size: u32) -> String {
         text.push_str(&format!("|{source:?}"));
         let file = match source {
             IconSource::Image(f) | IconSource::Resource(f, _) | IconSource::Shell(f) => Some(f),
-            IconSource::RecycleBin { .. } => None,
+            IconSource::RecycleBin { .. } | IconSource::FileType(_) => None,
         };
         if let Some(meta) = file.and_then(|f| std::fs::metadata(f).ok()).filter(|m| m.is_file()) {
             let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
@@ -195,7 +201,7 @@ pub fn source_stamp(sources: &[IconSource]) -> u64 {
     for source in sources {
         let file = match source {
             IconSource::Image(f) | IconSource::Resource(f, _) | IconSource::Shell(f) => Some(f),
-            IconSource::RecycleBin { .. } => None,
+            IconSource::RecycleBin { .. } | IconSource::FileType(_) => None,
         };
         if let Some(meta) = file.and_then(|f| std::fs::metadata(f).ok()).filter(|m| m.is_file()) {
             let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
@@ -318,6 +324,52 @@ impl IconLoader {
                 let len = info.szPath.iter().position(|&c| c == 0).unwrap_or(info.szPath.len());
                 self.from_resource(&String::from_utf16_lossy(&info.szPath[..len]), info.iIcon)
             }
+            IconSource::FileType(kind) => self.from_file_type(kind),
+        }
+    }
+
+    /// Windows' icon for a kind of file, as Explorer shows it, from the name alone: no file is
+    /// opened, so a file kept online isn't downloaded and a slow drive isn't asked.
+    fn from_file_type(&self, kind: &str) -> Result<IWICBitmapSource> {
+        const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        const ILD_TRANSPARENT: u32 = 0x1;
+        let (name, attributes) = match kind {
+            crate::folder::FOLDER_TYPE => ("folder", FILE_ATTRIBUTE_DIRECTORY),
+            "" => ("file", FILE_ATTRIBUTE_NORMAL),
+            ext => (ext, FILE_ATTRIBUTE_NORMAL),
+        };
+        unsafe {
+            let mut info = SHFILEINFOW::default();
+            let found = SHGetFileInfoW(
+                &HSTRING::from(name),
+                FILE_FLAGS_AND_ATTRIBUTES(attributes),
+                Some(&mut info),
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX,
+            );
+            if found == 0 {
+                return Err(Error::empty());
+            }
+            // The 256 px image, unless the kind only has a small one: then Windows puts that in
+            // the corner of the big image, and the 48 px image is the better start.
+            let mut best = None;
+            for list_size in [SHIL_JUMBO, SHIL_EXTRALARGE] {
+                let Ok(list) = SHGetImageList::<IImageList>(list_size as i32) else { continue };
+                let Ok(icon) = list.GetIcon(info.iIcon, ILD_TRANSPARENT) else { continue };
+                let pixels = icon_pixels(icon);
+                let _ = DestroyIcon(icon);
+                let Ok(pixels) = pixels else { continue };
+                if list_size == SHIL_JUMBO && filled_extent(&pixels) < pixels.width / 3 {
+                    continue;
+                }
+                best = Some(pixels);
+                break;
+            }
+            let pixels = best.ok_or_else(Error::empty)?;
+            self.wic
+                .CreateBitmapFromMemory(pixels.width, pixels.height, &GUID_WICPixelFormat32bppPBGRA, pixels.width * 4, &pixels.data)?
+                .cast()
         }
     }
 
@@ -468,6 +520,20 @@ unsafe fn icon_pixels(icon: HICON) -> Result<Pixels> {
     }
 }
 
+/// How far an icon's visible pixels reach from its top-left corner (the larger of across and
+/// down), in pixels.
+fn filled_extent(pixels: &Pixels) -> u32 {
+    let mut extent = 0;
+    for y in 0..pixels.height {
+        for x in 0..pixels.width {
+            if pixels.data[((y * pixels.width + x) * 4 + 3) as usize] > 0 {
+                extent = extent.max(x + 1).max(y + 1);
+            }
+        }
+    }
+    extent
+}
+
 /// A bitmap's pixels as 32-bit BGRA, top-down: width, height, bytes.
 unsafe fn bitmap_bits(hbitmap: HBITMAP) -> Result<(i32, i32, Vec<u8>)> {
     unsafe {
@@ -594,8 +660,14 @@ impl WorkerSetup {
 
 impl IconWorker {
     pub fn start(home: &Home, hwnd: HWND, message: u32, cache_only: bool) -> Self {
+        Self::start_in(home.icon_cache(), hwnd, message, cache_only)
+    }
+
+    /// The same, keeping its icons in `cache` (a folder's contents keep theirs apart, so the
+    /// dock's pruning leaves them alone).
+    pub fn start_in(cache: PathBuf, hwnd: HWND, message: u32, cache_only: bool) -> Self {
         let done = Arc::new(Mutex::new(Vec::new()));
-        let setup = WorkerSetup { done: done.clone(), cache: home.icon_cache(), hwnd: hwnd.0 as isize, message, cache_only };
+        let setup = WorkerSetup { done: done.clone(), cache, hwnd: hwnd.0 as isize, message, cache_only };
         Self { tasks: setup.spawn(), network: OnceLock::new(), setup, done }
     }
 
@@ -660,7 +732,18 @@ fn worker(tasks: Receiver<Task>, done: Arc<Mutex<Vec<Done>>>, cache: PathBuf, hw
             // Several reloads' worth can be waiting: each icon once.
             let mut seen = HashSet::new();
             wanted.retain(|(sources, size)| seen.insert(cache_key(sources, *size)));
-            make_with_helper(&wanted, &cache);
+            // Each one shows as soon as it's made, not when the last one is.
+            make_with_helpers(&wanted, &cache, || {
+                let mut now = Vec::new();
+                missing.retain(|job| match cached_exists(&cache, &job.sources, job.size).then(|| cached(&cache, &job.sources, job.size)).flatten() {
+                    Some(pixels) => {
+                        now.push(Done { generation: job.generation, item: job.item, part: job.part, pixels: Some(pixels) });
+                        false
+                    }
+                    None => true,
+                });
+                deliver(now);
+            });
             let made = missing
                 .into_iter()
                 .map(|job| {
@@ -684,7 +767,7 @@ fn worker(tasks: Receiver<Task>, done: Arc<Mutex<Vec<Done>>>, cache: PathBuf, hw
 pub fn on_network(sources: &[IconSource]) -> bool {
     sources.iter().any(|source| match source {
         IconSource::Image(path) | IconSource::Resource(path, _) | IconSource::Shell(path) => places::on_network(path),
-        IconSource::RecycleBin { .. } => false,
+        IconSource::RecycleBin { .. } | IconSource::FileType(_) => false,
     })
 }
 
@@ -699,47 +782,82 @@ fn cached_exists(cache: &Path, sources: &[IconSource], size: u32) -> bool {
 /// per icon, so a long list on a slow PC still gets through.
 const HELPER_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Runs `desktop-dock.exe --make-icons <list> <cache>` for these icons and waits for it.
-fn make_with_helper(wanted: &[(Vec<IconSource>, u32)], cache: &Path) {
-    let Ok(exe) = std::env::current_exe() else { return };
-    let list = std::env::temp_dir().join(format!("desktop-dock-icons-{}-{}.txt", std::process::id(), unique()));
-    let text: String = wanted.iter().map(|(sources, size)| encode_job(*size, sources) + "\n").collect();
-    if std::fs::write(&list, text).is_err() {
-        log_warn!("couldn't hand icons to the helper");
-        return;
+/// A long list of icons to make is shared out among up to `MAX_HELPERS` helpers working side by
+/// side, about this many each (a folder's pop-up of a few dozen shortcuts, say).
+const ICONS_PER_HELPER: usize = 8;
+const MAX_HELPERS: usize = 3;
+
+/// Runs `desktop-dock.exe --make-icons <list> <cache>` for these icons, in up to `MAX_HELPERS`
+/// processes at once, and waits for them. Each takes every so-many'th icon from the first, so the
+/// first ones (those in sight) come first. `made` is called every little while as icons land in
+/// the cache, and once at the end.
+fn make_with_helpers(wanted: &[(Vec<IconSource>, u32)], cache: &Path, mut made: impl FnMut()) {
+    use std::time::{Duration, Instant};
+    struct Helper {
+        child: std::process::Child,
+        list: PathBuf,
+        share: Vec<usize>,
+        made: usize,
+        progress: Instant,
     }
-    let (mut made, mut progress, mut counted) = (0, std::time::Instant::now(), std::time::Instant::now());
-    match std::process::Command::new(exe).arg("--make-icons").arg(&list).arg(cache).spawn() {
-        Ok(mut child) => loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
+    let Ok(exe) = std::env::current_exe() else { return };
+    let helpers = (wanted.len() / ICONS_PER_HELPER).clamp(1, MAX_HELPERS);
+    let mut running = Vec::new();
+    for first in 0..helpers {
+        let share: Vec<usize> = (first..wanted.len()).step_by(helpers).collect();
+        let list = std::env::temp_dir().join(format!("desktop-dock-icons-{}-{}.txt", std::process::id(), unique()));
+        let text: String = share.iter().map(|&i| encode_job(wanted[i].1, &wanted[i].0) + "\n").collect();
+        if std::fs::write(&list, text).is_err() {
+            log_warn!("couldn't hand icons to the helper");
+            continue;
+        }
+        match std::process::Command::new(&exe).arg("--make-icons").arg(&list).arg(cache).spawn() {
+            Ok(child) => running.push(Helper { child, list, share, made: 0, progress: Instant::now() }),
+            Err(e) => {
+                log_warn!("couldn't start the icon helper: {e}");
+                let _ = std::fs::remove_file(&list);
+            }
+        }
+    }
+    let mut counted = Instant::now();
+    while !running.is_empty() {
+        std::thread::sleep(Duration::from_millis(25));
+        made();
+        let count = counted.elapsed() >= Duration::from_secs(1);
+        if count {
+            counted = Instant::now();
+        }
+        running.retain_mut(|helper| {
+            let done = match helper.child.try_wait() {
+                Ok(Some(_)) => true,
                 Ok(None) => {
                     // Each icon it makes lands in the cache: that's its progress.
-                    if counted.elapsed() >= std::time::Duration::from_secs(1) {
-                        counted = std::time::Instant::now();
-                        let now_made = wanted.iter().filter(|(sources, size)| cached_exists(cache, sources, *size)).count();
-                        if now_made > made {
-                            (made, progress) = (now_made, counted);
+                    if count {
+                        let now_made = helper.share.iter().filter(|&&i| cached_exists(cache, &wanted[i].0, wanted[i].1)).count();
+                        if now_made > helper.made {
+                            (helper.made, helper.progress) = (now_made, Instant::now());
                         }
                     }
-                    if progress.elapsed() < HELPER_LIMIT {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        continue;
+                    if helper.progress.elapsed() < HELPER_LIMIT {
+                        return true;
                     }
-                    log_warn!("the icon helper made no icon for {} s ({made} of {} made); stopped it", HELPER_LIMIT.as_secs(), wanted.len());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
+                    log_warn!("the icon helper made no icon for {} s ({} of {} made); stopped it", HELPER_LIMIT.as_secs(), helper.made, helper.share.len());
+                    let _ = helper.child.kill();
+                    let _ = helper.child.wait();
+                    true
                 }
                 Err(_) => {
-                    let _ = child.kill();
-                    break;
+                    let _ = helper.child.kill();
+                    true
                 }
+            };
+            if done {
+                let _ = std::fs::remove_file(&helper.list);
             }
-        },
-        Err(e) => log_warn!("couldn't start the icon helper: {e}"),
+            !done
+        });
     }
-    let _ = std::fs::remove_file(&list);
+    made();
 }
 
 fn unique() -> u64 {
@@ -769,6 +887,7 @@ pub fn encode_job(size: u32, sources: &[IconSource]) -> String {
             IconSource::Resource(path, index) => format!("R:{index}:{path}"),
             IconSource::Shell(target) => format!("S:{target}"),
             IconSource::RecycleBin { full } => format!("B:{}", u8::from(*full)),
+            IconSource::FileType(kind) => format!("T:{kind}"),
         });
     }
     line
@@ -786,6 +905,7 @@ pub fn decode_job(line: &str) -> Option<(u32, Vec<IconSource>)> {
             }
             ("S", target) => Some(IconSource::Shell(target.into())),
             ("B", full) => Some(IconSource::RecycleBin { full: full == "1" }),
+            ("T", kind) => Some(IconSource::FileType(kind.into())),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;

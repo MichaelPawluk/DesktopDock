@@ -69,6 +69,10 @@ pub struct DockSettings {
     /// When the icons at their size don't fit along the screen (Settings > Screen): they shrink
     /// until they do (the default), or keep their size and scroll, with arrows at the dock's ends.
     pub overflow: Overflow,
+    /// A folder showing what's inside (Dock settings > Screen): at most this many across, and
+    /// this many rows in sight before it scrolls ("without scrolling": as many as fit those).
+    pub folder_columns: u32,
+    pub folder_rows: u32,
     /// The language the dock speaks (Dock settings > Look > Language): "auto" (the default) for
     /// Windows' own display language, or one of `text::LANGUAGES`' codes ("de", "pt-BR").
     pub language: String,
@@ -167,10 +171,15 @@ impl Default for DockSettings {
             stay_out: StayOut::BehindWindows,
             edge: Edge::Top,
             overflow: Overflow::Shrink,
+            folder_columns: 4,
+            folder_rows: 5,
             language: "auto".into(),
         }
     }
 }
+
+/// The least and most a folder's grid can be across or down (`folder_columns`, `folder_rows`).
+pub const FOLDER_GRID: (u32, u32) = (2, 8);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -273,10 +282,33 @@ pub struct ItemConfig {
     pub icon: String,
     pub run: RunState,
     pub admin: bool,
+    /// For a folder: what a click shows (`View`). Read as text, so a value from a newer
+    /// version just opens the folder.
+    pub view: String,
     /// Children of a group.
     pub items: Vec<ItemConfig>,
     /// Version 0 spelling of `kind = "separator"`; read, never written.
     separator: bool,
+}
+
+/// What a click on a folder shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum View {
+    /// The folder in File Explorer, as for any item.
+    #[default]
+    Folder,
+    /// What's inside, in a pop-up like a group's, read when clicked; past `folder_rows` rows it
+    /// scrolls.
+    Grid,
+    /// The same without scrolling: as many as fit (`folder_columns` x `folder_rows`), the last
+    /// tile opening the folder in File Explorer for the rest.
+    GridFit,
+}
+
+impl View {
+    pub fn shows_inside(self) -> bool {
+        self != View::Folder
+    }
 }
 
 /// The Recycle Bin's shell location.
@@ -290,6 +322,19 @@ impl ItemConfig {
 
     pub fn is_separator(&self) -> bool {
         self.kind == Kind::Separator
+    }
+
+    /// What a click on this folder shows. Anything but a plain item opens as it always has.
+    pub fn view(&self) -> View {
+        if self.kind != Kind::App {
+            return View::Folder;
+        }
+        match self.view.trim().to_ascii_lowercase().as_str() {
+            "grid" => View::Grid,
+            // ("grid-30": its name in builds before the grid's size could be chosen.)
+            "grid-fit" | "grid-30" => View::GridFit,
+            _ => View::Folder,
+        }
     }
 
     /// What clicking opens. The Recycle Bin needs no target in the file.
@@ -356,6 +401,8 @@ struct RawDock {
     stay_out: Option<String>,
     edge: Option<String>,
     overflow: Option<String>,
+    folder_columns: Option<u32>,
+    folder_rows: Option<u32>,
     language: Option<String>,
     /// Version 0: zoom as a multiple of icon_size.
     hover_scale: Option<f32>,
@@ -366,10 +413,10 @@ pub(crate) const DOCK_KEYS: &[&str] = &[
     "icon_size", "zoom_size", "zoom_ms", "spacing", "popup_delay_ms", "hide_delay_ms",
     "slide_in_ms", "slide_out_ms", "show_labels", "always_show_labels", "label_size", "background_opacity", "icon_opacity",
     "launch_effect", "locked", "double_click", "look", "style", "hover_glow", "monitor", "hotkey", "check_updates", "auto_hide", "stay_out",
-    "edge", "overflow", "language", "hover_scale",
+    "edge", "overflow", "folder_columns", "folder_rows", "language", "hover_scale",
 ];
 pub(crate) const ITEM_KEYS: &[&str] = &[
-    "kind", "name", "target", "app_id", "args", "start_in", "icon", "run", "admin", "items", "separator",
+    "kind", "name", "target", "app_id", "args", "start_in", "icon", "run", "admin", "view", "items", "separator",
 ];
 
 /// What's said about a file that isn't text the dock can read (in English: said with `text::t`).
@@ -434,6 +481,9 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
     let label_size = clamp("label_size", r.label_size.unwrap_or(d.label_size), d.label_size, 8.0, 24.0);
     let background_opacity = clamp("background_opacity", r.background_opacity.unwrap_or(d.background_opacity) as f32, 100.0, 0.0, 100.0) as u32;
     let icon_opacity = clamp("icon_opacity", r.icon_opacity.unwrap_or(d.icon_opacity) as f32, 100.0, 10.0, 100.0) as u32;
+    let (least, most) = (FOLDER_GRID.0 as f32, FOLDER_GRID.1 as f32);
+    let folder_columns = clamp("folder_columns", r.folder_columns.unwrap_or(d.folder_columns) as f32, d.folder_columns as f32, least, most) as u32;
+    let folder_rows = clamp("folder_rows", r.folder_rows.unwrap_or(d.folder_rows) as f32, d.folder_rows as f32, least, most) as u32;
     let mut clamp_ms = |key: &str, value: Option<u64>, default: u64, hi: u64| -> u64 {
         let value = value.unwrap_or(default);
         if value > hi {
@@ -475,6 +525,8 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         stay_out: choice("stay_out", r.stay_out.as_deref(), StayOut::NAMES, d.stay_out, &mut warnings),
         edge: choice("edge", r.edge.as_deref(), Edge::NAMES, d.edge, &mut warnings),
         overflow: choice("overflow", r.overflow.as_deref(), Overflow::NAMES, d.overflow, &mut warnings),
+        folder_columns,
+        folder_rows,
         language: match r.language.as_deref().map(str::trim) {
             None | Some("") => d.language,
             Some(word) if word.eq_ignore_ascii_case("auto") => d.language,
@@ -639,6 +691,30 @@ target = 'C:\Discord\Update.exe'
 
     fn ok(text: &str) -> Parsed {
         parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_folder_shows_whats_inside_only_when_asked() {
+        let parsed = ok("version = 1\n[[item]]\nname = 'F'\ntarget = 'C:\\F'\nview = \"grid\"\n\n[[item]]\nname = 'G'\ntarget = 'C:\\G'\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.config.items[0].view(), View::Grid);
+        assert_eq!(parsed.config.items[1].view(), View::Folder, "no key: it opens File Explorer, as before");
+        let item = |view: &str| ItemConfig { view: view.into(), ..ItemConfig::new("F", r"C:\F") };
+        assert_eq!(item(" Grid-Fit ").view(), View::GridFit);
+        assert_eq!(item("grid-30").view(), View::GridFit, "as the hand-check builds wrote it");
+        assert_eq!(item("folder").view(), View::Folder);
+        assert_eq!(item("list").view(), View::Folder, "a view from a newer version just opens the folder");
+        assert_eq!(ItemConfig { kind: Kind::Group, ..item("grid") }.view(), View::Folder, "only a plain item shows a folder");
+        assert!(!View::Folder.shows_inside() && View::Grid.shows_inside() && View::GridFit.shows_inside());
+        // The grid's size: 4 across and 5 rows unless chosen, always 2 to 8.
+        let dock = |toml: &str| parse(&format!("version = 1\n[dock]\n{toml}\n")).unwrap().config.dock;
+        assert_eq!((dock("").folder_columns, dock("").folder_rows), (4, 5));
+        assert_eq!((dock("folder_columns = 6\nfolder_rows = 3").folder_columns, dock("folder_columns = 6\nfolder_rows = 3").folder_rows), (6, 3));
+        assert_eq!((dock("folder_columns = 1").folder_columns, dock("folder_rows = 40").folder_rows), (2, 8), "kept within 2 to 8");
+        // Saved as it was set, and not at all when it isn't.
+        let table = crate::edit::item_table(&item("grid"));
+        assert_eq!(table.get("view").and_then(|v| v.as_str()), Some("grid"));
+        assert!(crate::edit::item_table(&item("")).get("view").is_none());
     }
 
     #[test]

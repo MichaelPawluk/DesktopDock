@@ -30,10 +30,18 @@ const APP_ICON: u16 = 1;
 
 struct Fonts {
     dpi: u32,
+    /// The windows' text: a point larger than the dialogs' own 9 (whose sizes the layouts are
+    /// still measured in), so it's easier to read without the windows growing.
+    body: HFONT,
     title: HFONT,
     heading: HFONT,
     symbols: HFONT,
 }
+
+/// The windows' text size, in points (`Fonts::body`); headings are a point larger, semibold.
+pub const BODY_POINTS: f32 = 10.0;
+/// A window's title (the settings window's page name, setup's heading), semibold.
+pub const TITLE_POINTS: f32 = 15.0;
 
 thread_local! {
     /// One set per scaling the windows have been at (a window moved to a screen with different
@@ -69,14 +77,21 @@ fn with_fonts<R>(hwnd: HWND, f: impl FnOnce(&Fonts) -> R) -> R {
         let mut sets = cell.borrow_mut();
         if !sets.iter().any(|fonts| fonts.dpi == dpi) {
             // Windows 11's symbol font; Windows 10 has the same symbols in its older one.
-            let mut symbols = font(dpi, 11.5, 400, "Segoe Fluent Icons");
+            let mut symbols = font(dpi, 12.5, 400, "Segoe Fluent Icons");
             if !face_of(symbols).eq_ignore_ascii_case("Segoe Fluent Icons") {
                 unsafe {
                     let _ = DeleteObject(symbols.into());
                 }
-                symbols = font(dpi, 11.5, 400, "Segoe MDL2 Assets");
+                symbols = font(dpi, 12.5, 400, "Segoe MDL2 Assets");
             }
-            sets.push(Fonts { dpi, title: font(dpi, 15.0, FW_SEMIBOLD.0 as i32, "Segoe UI"), heading: font(dpi, 10.0, FW_SEMIBOLD.0 as i32, "Segoe UI"), symbols });
+            let semibold = FW_SEMIBOLD.0 as i32;
+            sets.push(Fonts {
+                dpi,
+                body: font(dpi, BODY_POINTS, 400, "Segoe UI"),
+                title: font(dpi, TITLE_POINTS, semibold, "Segoe UI"),
+                heading: font(dpi, BODY_POINTS + 1.0, semibold, "Segoe UI"),
+                symbols,
+            });
         }
         f(sets.iter().find(|fonts| fonts.dpi == dpi).expect("made above"))
     })
@@ -131,6 +146,22 @@ pub fn set_app_icon(hwnd: HWND) {
                 SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize)));
             }
         }
+    }
+}
+
+/// Every control in a window, its pages' too, in the windows' text size (`BODY_POINTS`). Run
+/// before `style_title` and `style_headings`, which then set theirs.
+pub fn style_body(window: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
+    unsafe extern "system" fn set(control: HWND, font: LPARAM) -> BOOL {
+        unsafe {
+            SendMessageW(control, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+        }
+        BOOL(1)
+    }
+    let body = with_fonts(window, |fonts| fonts.body);
+    unsafe {
+        let _ = EnumChildWindows(Some(window), Some(set), LPARAM(body.0 as isize));
     }
 }
 

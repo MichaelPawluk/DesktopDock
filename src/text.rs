@@ -772,10 +772,12 @@ mod tests {
         println!("{} texts in {}", places.len(), path.display());
     }
 
-    /// A dialog control with a text, from the .rc: its dialog, kind, text and size in dialog units.
+    /// A dialog control with a text, from the .rc: its dialog, kind, id, text and size in dialog
+    /// units.
     struct RcText {
         dialog: String,
         kind: String,
+        id: i32,
         text: String,
         width: i32,
         height: i32,
@@ -804,7 +806,8 @@ mod tests {
             let fields: Vec<&str> = line[close + 1..].split(',').map(str::trim).collect();
             let (Some(width), Some(height)) = (fields.get(4).and_then(|f| f.parse().ok()), fields.get(5).and_then(|f| f.parse().ok())) else { continue };
             let cut_on_purpose = line.contains("ELLIPSIS");
-            found.push(RcText { dialog: dialog.clone(), kind: kind.to_string(), text, width, height, cut_on_purpose });
+            let id = fields.get(1).and_then(|f| f.parse().ok()).unwrap_or(-1);
+            found.push(RcText { dialog: dialog.clone(), kind: kind.to_string(), id, text, width, height, cut_on_purpose });
         }
         found
     }
@@ -820,10 +823,21 @@ mod tests {
         assert!(texts.len() > 50, "the dialogs' texts were found ({})", texts.len());
         let mut problems = Vec::new();
         unsafe {
-            // The dialogs' font (FONT 9, "Segoe UI") at 100%: 9 points is 12 pixels.
+            // At 100%, a point is 4/3 of a pixel. The layouts are in the dialogs' own font's units
+            // (FONT 9, "Segoe UI"); the settings window, Properties and the icon picker show their
+            // text a size larger (chrome::BODY_POINTS), headings a point more, semibold; setup and
+            // removal keep the dialogs' own, with a title-size heading.
+            let pixels = |points: f32| -((points * 96.0 / 72.0).round() as i32);
+            let make = |points: f32, weight: i32| {
+                CreateFontW(pixels(points), 0, 0, 0, weight, 0, 0, 0, Default::default(), Default::default(), Default::default(), Default::default(), 0, w!("Segoe UI"))
+            };
+            let semibold = 600;
+            let layout_font = make(9.0, 400);
+            let body = make(crate::chrome::BODY_POINTS, 400);
+            let heading = make(crate::chrome::BODY_POINTS + 1.0, semibold);
+            let title = make(crate::chrome::TITLE_POINTS, semibold);
             let dc = CreateCompatibleDC(None);
-            let font = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, Default::default(), Default::default(), Default::default(), Default::default(), 0, w!("Segoe UI"));
-            let old = SelectObject(dc, HGDIOBJ(font.0));
+            let old = SelectObject(dc, HGDIOBJ(layout_font.0));
             let size = |text: &str, wrap_width: Option<i32>| {
                 let mut wide: Vec<u16> = text.encode_utf16().collect();
                 let mut r = RECT { left: 0, top: 0, right: wrap_width.unwrap_or(10_000), bottom: 0 };
@@ -831,19 +845,37 @@ mod tests {
                 DrawTextW(dc, &mut wide, &mut r, flags);
                 (r.right - r.left, r.bottom - r.top)
             };
-            // Dialog units: a quarter of the font's average letter across, an eighth of its height down.
+            let line_height = || {
+                let mut metrics = TEXTMETRICW::default();
+                let _ = GetTextMetricsW(dc, &mut metrics);
+                metrics.tmHeight
+            };
+            // Dialog units: a quarter of the layout font's average letter across, an eighth of its
+            // height down.
             let (letters, _) = size("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", None);
             let base_x = (letters / 26 + 1) / 2;
-            let mut metrics = TEXTMETRICW::default();
-            let _ = GetTextMetricsW(dc, &mut metrics);
-            let base_y = metrics.tmHeight;
+            let base_y = line_height();
             for (index, language) in LANGUAGES.iter().enumerate() {
                 for rc in &texts {
                     let shown = match table(index).get(&rc.text) {
                         Some(Entry::One(text)) if index != 0 => text.as_str(),
                         _ => rc.text.as_str(),
                     };
+                    let setup = matches!(rc.dialog.as_str(), "110" | "111");
+                    let font = match rc.id {
+                        2002 if setup => title,
+                        1098 | 1902 if !setup => heading,
+                        _ if setup => layout_font,
+                        _ => body,
+                    };
+                    SelectObject(dc, HGDIOBJ(font.0));
+                    let mut metrics = TEXTMETRICW::default();
+                    let _ = GetTextMetricsW(dc, &mut metrics);
                     let (width, height) = (rc.width * base_x / 4, rc.height * base_y / 8);
+                    // A text's line must fit the control's height (the same in every language).
+                    if index == 0 && rc.kind.ends_with("TEXT") && metrics.tmHeight > height {
+                        problems.push(format!("dialog {} {} '{}' ({} DLU tall: a line needs {} px, it has {})", rc.dialog, rc.kind, rc.text, rc.height, metrics.tmHeight, height));
+                    }
                     // Room the control itself takes: a button's edges, a tick box and its gap.
                     let taken = match rc.kind.as_str() {
                         "PUSHBUTTON" | "DEFPUSHBUTTON" => 10,
@@ -863,9 +895,12 @@ mod tests {
                 }
             }
             SelectObject(dc, old);
-            let _ = DeleteObject(HGDIOBJ(font.0));
+            for font in [layout_font, body, heading, title] {
+                let _ = DeleteObject(HGDIOBJ(font.0));
+            }
             let _ = DeleteDC(dc);
         }
+        problems.dedup();
         assert!(problems.is_empty(), "texts too long for their controls:\n  {}", problems.join("\n  "));
     }
 

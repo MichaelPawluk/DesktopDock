@@ -9,6 +9,7 @@ mod config;
 mod dock;
 mod drop;
 mod edit;
+mod folder;
 mod heal;
 mod home;
 mod hotkey;

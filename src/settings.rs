@@ -16,7 +16,7 @@
 //!
 //! Built from dialog templates (assets\desktop-dock.rc), so Windows scales them for the display.
 
-use crate::config::{self, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, Kind, LaunchEffect, Overflow, RunState, StayOut};
+use crate::config::{self, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, Kind, LaunchEffect, Overflow, RunState, StayOut, View};
 use crate::edit::{self, Spot};
 use crate::home::Home;
 use crate::icons::{self, IconLoader, IconSource, Pixels};
@@ -108,6 +108,8 @@ const IDC_ARGS: i32 = 1113;
 const IDC_START_IN: i32 = 1114;
 const IDC_START_BROWSE: i32 = 1115;
 const IDC_RUN: i32 = 1116;
+/// A folder: what a click shows (`config::View`).
+const IDC_VIEW: i32 = 1123;
 const IDC_ADMIN: i32 = 1117;
 const IDC_ICON: i32 = 1118;
 const IDC_ICON_CHANGE: i32 = 1119;
@@ -209,6 +211,9 @@ const SECTIONS: [(&str, usize, u16); 8] = [
     (n!("Files"), IDD_FILES, 0xE8B7),            // a folder
     (n!("About"), IDD_ABOUT, 0xE946),            // an i
 ];
+/// Where the pages go in the settings window, in dialog units (left, top, right, bottom): right of
+/// the section list, under the title (desktop-dock.rc, dialog 100).
+const PAGE_AREA: (i32, i32, i32, i32) = (110, 26, 480, 272);
 const SECTION_SCREEN: usize = 2;
 const SECTION_ITEMS: usize = 3;
 const SECTION_REMOVED: usize = 4;
@@ -223,6 +228,9 @@ const IDC_SHORTCUT_CLEAR: i32 = 2104;
 const IDC_SHORTCUT_NOTE: i32 = 2105;
 const IDC_EDGE: i32 = 2106;
 const IDC_OVERFLOW: i32 = 2108;
+/// A folder showing what's inside: how many across, and rows before it scrolls.
+const IDC_FOLDER_COLUMNS: i32 = 2109;
+const IDC_FOLDER_ROWS: i32 = 2110;
 const IDC_TASKBAR_SETTINGS: i32 = 2107;
 /// The shortcut box (a hotkey control) changed.
 const EN_CHANGE: u32 = 0x0300;
@@ -307,6 +315,7 @@ fn property_saved(key: &str) -> &'static str {
         "args" => tr!("Arguments: saved."),
         "start_in" => tr!("Start in: saved."),
         "icon" => tr!("Icon: saved."),
+        "view" => tr!("When clicked: saved."),
         _ => tr!("Run: saved."),
     }
 }
@@ -319,6 +328,7 @@ fn property_not_saved(key: &str, error: String) -> String {
         "args" => tr!("Arguments wasn't saved. {error}", error = error),
         "start_in" => tr!("Start in wasn't saved. {error}", error = error),
         "icon" => tr!("Icon wasn't saved. {error}", error = error),
+        "view" => tr!("When clicked wasn't saved. {error}", error = error),
         _ => tr!("Run wasn't saved. {error}", error = error),
     }
 }
@@ -597,6 +607,23 @@ fn same_properties(a: &ItemConfig, b: &ItemConfig) -> bool {
     (&a.name, &a.target, &a.args, &a.start_in, &a.icon, a.run, a.admin) == (&b.name, &b.target, &b.args, &b.start_in, &b.icon, b.run, b.admin)
 }
 
+/// How a folder's choice is written in dock.toml, in the choice's order.
+fn view_word(choice: usize) -> &'static str {
+    match choice {
+        1 => "grid",
+        2 => "grid-fit",
+        _ => "",
+    }
+}
+
+fn view_choice(view: View) -> usize {
+    match view {
+        View::Folder => 0,
+        View::Grid => 1,
+        View::GridFit => 2,
+    }
+}
+
 fn run_word(run: RunState) -> &'static str {
     match run {
         RunState::Normal => "",
@@ -705,6 +732,13 @@ fn fixed_texts(window: HWND, pages: &[HWND], page: HWND) {
     combo(IDC_OVERFLOW, &[tr!("Shrink to fit the screen"), tr!("Keep their size, scroll with arrows")]);
     combo(IDC_HOVER_GLOW, &[tr!("None"), tr!("Windows accent colour"), tr!("Each icon's own colour")]);
     combo(IDC_RUN, &[tr!("Normal window"), tr!("Minimised"), tr!("Maximised")]);
+    // In `view_word`'s order.
+    combo(IDC_VIEW, &[tr!("Open the folder"), tr!("Show what's inside"), tr!("Show what's inside, without scrolling")]);
+    // A folder's grid: how many across and how many rows (2 to 8).
+    let numbers: Vec<String> = (config::FOLDER_GRID.0..=config::FOLDER_GRID.1).map(|n| n.to_string()).collect();
+    let sizes: Vec<&str> = numbers.iter().map(String::as_str).collect();
+    combo(IDC_FOLDER_COLUMNS, &sizes);
+    combo(IDC_FOLDER_ROWS, &sizes);
     // Windows' own choice first (named in its own language), then each language by its own name.
     let windows_language = tr!("Windows' language ({name})", name = LANGUAGES[text::windows_choice()].name);
     let languages: Vec<&str> = std::iter::once(windows_language.as_str()).chain(LANGUAGES.iter().map(|language| language.name)).collect();
@@ -806,7 +840,8 @@ pub fn run(home: Home, open: Open) -> i32 {
                 };
                 text::translate_dialog(window);
                 // Each section's page fills the page area of the window (dialog units to pixels).
-                let mut area = RECT { left: 94, top: 26, right: 464, bottom: 272 };
+                let (left, top, right, bottom) = PAGE_AREA;
+                let mut area = RECT { left, top, right, bottom };
                 let _ = MapDialogRect(window, &mut area);
                 for (_, id, _) in SECTIONS {
                     let Ok(page) = CreateDialogParamW(Some(instance.into()), template(id), Some(window), Some(page_proc), LPARAM(0)) else {
@@ -851,6 +886,7 @@ pub fn run(home: Home, open: Open) -> i32 {
                     return 1;
                 };
                 text::translate_dialog(window);
+                chrome::style_body(window);
                 (window, window)
             }
         };
@@ -947,10 +983,11 @@ pub fn run(home: Home, open: Open) -> i32 {
     0
 }
 
-/// The settings window's finish: the title's and headings' fonts and the section list's rows,
-/// for the window's scaling (again when it moves to a screen with different scaling).
+/// The settings window's finish: its text's, the title's and headings' fonts and the section
+/// list's rows, for the window's scaling (again when it moves to a screen with different scaling).
 fn style(window: HWND, pages: &[HWND]) {
     unsafe {
+        chrome::style_body(window);
         if let Ok(title) = GetDlgItem(Some(window), IDC_TITLE) {
             chrome::style_title(title);
         }
@@ -1170,7 +1207,9 @@ unsafe extern "system" fn properties_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
     let id = (wparam.0 & 0xFFFF) as i32;
     let for_window = match msg {
         WM_COMMAND => id == IDOK.0 || id == IDCANCEL.0 || id == IDC_REVERT,
-        WM_TIMER | WM_APP_SELECT | WM_APP_PICK_ICON | WM_CLOSE | WM_DESTROY => true,
+        // (Moved to a screen with different scaling: its text's font follows, as the settings
+        // window's does.)
+        WM_TIMER | WM_APP_SELECT | WM_APP_PICK_ICON | WM_CLOSE | WM_DESTROY | WM_DPICHANGED | WM_APP_RESTYLE => true,
         _ => false,
     };
     unsafe { if for_window { window_proc(hwnd, msg, wparam, lparam) } else { page_proc(hwnd, msg, wparam, lparam) } }
@@ -1443,6 +1482,12 @@ impl Settings {
             if let Ok(combo) = GetDlgItem(Some(page), IDC_OVERFLOW) {
                 let index = Overflow::NAMES.iter().position(|&(_, o)| o == self.dock.overflow).unwrap_or(0);
                 SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+            }
+            for (id, value) in [(IDC_FOLDER_COLUMNS, self.dock.folder_columns), (IDC_FOLDER_ROWS, self.dock.folder_rows)] {
+                if let Ok(combo) = GetDlgItem(Some(page), id) {
+                    let index = value.saturating_sub(config::FOLDER_GRID.0) as usize;
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                }
             }
             if let Ok(button) = GetDlgItem(Some(page), IDC_TASKBAR_SETTINGS) {
                 let _ = ShowWindow(button, if taskbar_there { SW_SHOW } else { SW_HIDE });
@@ -1909,12 +1954,21 @@ impl Settings {
                 SendMessageW(run, CB_SETCURSEL, Some(WPARAM(choice)), None);
             }
             let _ = CheckDlgButton(page, IDC_ADMIN, if item.admin { BST_CHECKED } else { BST_UNCHECKED });
+            if let Ok(view) = GetDlgItem(Some(page), IDC_VIEW) {
+                SendMessageW(view, CB_SETCURSEL, Some(WPARAM(view_choice(item.view()))), None);
+            }
         }
         for id in [IDC_TARGET, IDC_TARGET_BROWSE, IDC_ARGS, IDC_START_IN, IDC_START_BROWSE, IDC_RUN, IDC_ADMIN] {
             enable(page, id, opens_something && !windows_item);
         }
         let there = opens_something && Path::new(&places::on_disk(&self.home, item.launch_target())).exists();
         enable(page, IDC_OPEN_LOCATION, there);
+        // Only a folder can show what's inside (one on another computer isn't asked here). One of
+        // your own folders added as a Windows item (Documents, Downloads) is one: it's a folder
+        // on disk. This PC, Control Panel and the like aren't.
+        let on_disk = places::on_disk(&self.home, item.launch_target());
+        let a_folder = opens_something && (places::on_network(&on_disk) || Path::new(&on_disk).is_dir());
+        enable(page, IDC_VIEW, a_folder);
         enable(page, IDC_NAME, named);
         enable(page, IDC_ICON_CHANGE, named);
         enable(page, IDC_ICON_RESET, named && !item.icon.trim().is_empty());
@@ -2046,6 +2100,10 @@ impl Settings {
                     _ => RunState::Normal,
                 };
                 self.set_field(spot, &expect, "run", run_word(run));
+            }
+            (IDC_VIEW, CBN_SELCHANGE) => {
+                let choice = unsafe { GetDlgItem(Some(self.page), IDC_VIEW).map(|view| SendMessageW(view, CB_GETCURSEL, None, None).0).unwrap_or(0) };
+                self.set_field(spot, &expect, "view", view_word(choice.max(0) as usize));
             }
             (IDC_ADMIN, BN_CLICKED) => {
                 let on = unsafe { IsDlgButtonChecked(self.page, IDC_ADMIN) } == BST_CHECKED.0;
@@ -2189,6 +2247,18 @@ impl Settings {
                 let not_saved = |e: String| tr!("When the icons don't fit wasn't saved. {error}", error = e);
                 self.change(tr!("When the icons don't fit: saved."), not_saved, None, true, |doc| edit::set_dock(doc, "overflow", word));
             }
+            (IDC_FOLDER_COLUMNS, CBN_SELCHANGE) => {
+                let choice = self.control(IDC_FOLDER_COLUMNS).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 }.max(0));
+                let value = (config::FOLDER_GRID.0 as i64 + choice as i64).min(config::FOLDER_GRID.1 as i64);
+                let not_saved = |e: String| tr!("Folder columns weren't saved. {error}", error = e);
+                self.change(tr!("Folder columns: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "folder_columns", value));
+            }
+            (IDC_FOLDER_ROWS, CBN_SELCHANGE) => {
+                let choice = self.control(IDC_FOLDER_ROWS).map_or(0, |combo| unsafe { SendMessageW(combo, CB_GETCURSEL, None, None).0 }.max(0));
+                let value = (config::FOLDER_GRID.0 as i64 + choice as i64).min(config::FOLDER_GRID.1 as i64);
+                let not_saved = |e: String| tr!("Folder rows weren't saved. {error}", error = e);
+                self.change(tr!("Folder rows: saved."), not_saved, None, false, |doc| edit::set_dock(doc, "folder_rows", value));
+            }
             (IDC_TASKBAR_SETTINGS, BN_CLICKED) => launch::open(Path::new("ms-settings:taskbar")),
             (IDC_RESTING, CBN_SELCHANGE) => {
                 // Slides out of sight (auto_hide), or stays out behind windows, always behind them
@@ -2300,6 +2370,7 @@ impl Settings {
             "start_in" => &item.start_in,
             "icon" => &item.icon,
             "run" => run_word(item.run),
+            "view" => view_word(view_choice(item.view())),
             _ => "",
         };
         if current == value {
@@ -2310,7 +2381,7 @@ impl Settings {
             renamed.name = value.to_string();
             edit::label_of(&renamed)
         });
-        let show = key != "run"; // a name, target or icon: worth a look
+        let show = key != "run" && key != "view"; // a name, target or icon: worth a look
         self.change(property_saved(key), |e| property_not_saved(key, e), renamed, show, |doc| edit::set_text(doc, spot, expect, key, value));
     }
 
@@ -2933,7 +3004,8 @@ mod tests {
         // The pages fill the page area exactly (settings.rs places them there).
         for (id, _) in SECTIONS.iter().map(|(_, id, _)| (*id, ())) {
             let page = all.iter().find(|(d, ..)| *d == id).unwrap_or_else(|| panic!("page {id} missing"));
-            assert_eq!((page.1, page.2), (464 - 94, 272 - 26), "page {id} isn't the page area's size");
+            let (left, top, right, bottom) = PAGE_AREA;
+            assert_eq!((page.1, page.2), (right - left, bottom - top), "page {id} isn't the page area's size");
         }
         for (id, width, height, controls) in &all {
             for (line, x, y, w, h) in controls {

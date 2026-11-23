@@ -32,6 +32,8 @@ locked = false             # true: no dragging icons around, off, or onto the do
 double_click = false       # true: an item opens with a double click, not one click; a group still opens with one, and the items in it need a double click
 edge = "top"               # the screen edge it's on: "top", "bottom", "left" or "right" (beside a taskbar on that edge, never over it)
 overflow = "shrink"        # icons that don't fit along the screen: "shrink" (they get smaller until they fit) or "scroll" (they keep their size, and ‹ › at the dock's ends and the mouse wheel move along)
+folder_columns = 4         # a folder showing what's inside (view, below): at most this many across, 2-8
+folder_rows = 5            # and this many rows in sight before it scrolls, 2-8 (Dock settings > Screen)
 language = "auto"          # the language it speaks: "auto" (Windows' display language), or "en", "de", "fr", "es", "pt-BR", "ru", "zh-CN", "ja"
 auto_hide = true           # false: the dock stays out when you're not using it (right-click > Hide automatically)
 stay_out = "behind-windows" # how it stays out: "behind-windows" (windows cover it; rest the pointer at the edge, or push it there where the taskbar is, to bring it over them), "always-behind" (windows cover it, full-screen programs too, and only the keyboard shortcut brings it over them) or "on-top"
@@ -45,6 +47,11 @@ target = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 name = "Pictures"
 target = '%USERPROFILE%\Pictures'
 icon = 'C:\Windows\System32\imageres.dll,-113'   # icon inside a file: "file,-resource id"
+
+[[item]]
+name = "Projects"
+target = '%USERPROFILE%\Documents\Projects'
+view = "grid"              # a click shows what's inside, not File Explorer (When clicked in Dock settings)
 
 [[item]]
 name = "Music Studio 2026"
@@ -86,6 +93,7 @@ kind = "recycle-bin"       # uses Windows' own empty/full icons
 | `icon` | Image file (PNG/ICO/JPG) or `file,-id` / `file,index` icon inside a file | target's own icon |
 | `run` | Window state on launch | `normal` |
 | `admin` | Run as administrator (Windows asks for permission) | `false` |
+| `view` | For a folder, what a click does: `folder` opens it in File Explorer; `grid` shows what's inside in a pop-up (subfolders open inside it; `folder_columns` across, and past `folder_rows` rows it scrolls); `grid-fit` shows as many as fit without scrolling, the last tile opening the rest in File Explorer. The folder is read at each click and never watched. Any other value, or `view` on something that isn't a folder, opens it as usual | `folder` |
 | `items` | Child items, for `kind = "group"` only (one level deep) | — |
 
 **Paths:** `%VARS%` like `%USERPROFILE%` are expanded. Relative paths resolve against the dock folder (e.g. `shortcuts\Word.lnk`).

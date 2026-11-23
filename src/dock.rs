@@ -3,7 +3,8 @@
 
 use crate::chrome;
 use crate::config::{self, ChangeWatch, Config, DockLook, DockSettings, DockStyle, Edge, HoverGlow, ItemConfig, LaunchEffect, StayOut};
-use crate::config::Kind;
+use crate::config::{Kind, View};
+use crate::folder;
 use crate::skin::{self, Rgba, Skin};
 use crate::update;
 use crate::heal;
@@ -23,7 +24,7 @@ use crate::{launch, places, system};
 use crate::{log_info, log_warn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
@@ -98,6 +99,16 @@ const REST_TIDY_MS: u32 = 2000;
 /// One-shot: opening with a double click, one click has had its double-click time with no second
 /// press: the item says how to open it, in place of its name.
 const TIMER_LONE_CLICK: usize = 12;
+/// A folder showing what's inside that hasn't answered by then says it isn't answering (the
+/// answer still shows if it comes).
+const TIMER_FOLDER_SLOW: usize = 13;
+const FOLDER_SLOW_MS: u32 = 1500;
+/// A folder's pop-up gliding to where the wheel or its scroll bar sends it: each frame, this
+/// share of the way left per second (as 1 - e^(-rate x seconds)): a row in about a fifth of a
+/// second, a page a little longer, slowing as it settles.
+const POPUP_SCROLL_RATE: f32 = 20.0;
+/// A folder's icons are kept apart from the dock's, and the lot is cleared past this many.
+const FOLDER_ICONS_KEEP: usize = 2000;
 /// Scrolling: how long the icons take to glide to where an arrow or the wheel sends them.
 const SCROLL_GLIDE: Duration = Duration::from_millis(200);
 /// Scrolling: how long an arrow's glow takes to come up under the pointer, and to fade once
@@ -247,6 +258,8 @@ const WM_APP_UPDATES_CHECKED: u32 = WM_APP + 14;
 /// Windows changed order with the desktop in use (`system::DesktopNews`): Show desktop may have
 /// lifted it over a dock resting behind windows.
 const WM_APP_DESKTOP_NEWS: u32 = WM_APP + 15;
+/// A folder showing what's inside has been read (see `folder::read_in_background`).
+const WM_APP_FOLDER: u32 = WM_APP + 16;
 /// After that news, how long the dock looks quickly for the desktop being lifted over it. News
 /// that keeps coming (no quiet second between) gets that many looks in a row, then a rest.
 const DESKTOP_WATCH_FOR: Duration = Duration::from_millis(600);
@@ -304,6 +317,8 @@ enum Action {
     ConfirmReplace(usize, String, ItemConfig),
     /// Right-click on an item in an open group's pop-up: where, the group, the item.
     ChildMenu(POINT, usize, usize),
+    /// Right-click on something in a folder's pop-up: where, the folder's item, which one.
+    FolderMenu(POINT, usize, usize),
     /// Test only: a message loop of its own for this many seconds (WM_APP_TEST_MODAL).
     TestModal(u64),
 }
@@ -636,6 +651,16 @@ pub struct Dock {
     drag_window: Option<HWND>,
     /// The open group, if any, and the window its pop-up shows in (see popup.rs).
     group: Option<OpenGroup>,
+    /// A folder's icons: made by a worker of their own and kept in a cache folder of their own,
+    /// which the dock's tidying leaves alone (started when first needed).
+    folder_icons: Option<IconWorker>,
+    /// Folders read in the background, and their answers.
+    folder_reads: folder::Answers,
+    folder_reads_made: u64,
+    /// Folders still being read (a server that's off can take long): never two at once.
+    folder_running: HashMap<PathBuf, u64>,
+    /// The read a pop-up is waiting for.
+    folder_waiting: Option<FolderWait>,
     /// The left button went down on an item in a group's pop-up (group, item, where on the
     /// screen); a drag starts once it moves. The pop-up holds the mouse meanwhile.
     child_press: Option<(usize, usize, POINT)>,
@@ -695,6 +720,52 @@ struct OpenGroup {
     pressed: Option<usize>,
     closer: popup::Closer,
     tracking: bool,
+    /// Showing what's inside a folder (None: a group). Its items are the item's `children`
+    /// while it's open, and gone when it closes.
+    folder: Option<FolderView>,
+}
+
+/// A folder's pop-up, beyond what a group's has.
+struct FolderView {
+    view: View,
+    /// From the dock's folder (first) to the one showing (last): name and place.
+    trail: Vec<(String, PathBuf)>,
+    /// The read that filled it: icons made for an older one are set aside.
+    listing: u64,
+    /// Which of its items are folders (a click goes inside them).
+    dirs: Vec<bool>,
+    /// "Without scrolling" with more than fit: the last tile opens the folder for the rest.
+    capped: bool,
+    /// Shown instead of items: why there are none.
+    note: Option<Vec<u16>>,
+    /// The pointer is on this button, and it was pressed on this one.
+    button: Option<popup::Button>,
+    pressed_button: Option<popup::Button>,
+    /// Where its items are gliding to (scrolled that far), until they're there; the wheel's
+    /// turns not yet a notch; and the glide's frames, the slowest one's drawing and its start
+    /// (for the log).
+    aim: Option<f32>,
+    wheel_rest: i32,
+    frames: (u32, Duration, Instant),
+    /// The pointer is on the scroll bar; its thumb is being dragged, held this far below its top.
+    bar_hot: bool,
+    bar_drag: Option<f32>,
+    /// The lines drawn for its buttons, made with its layout.
+    glyphs: Vec<(popup::Button, ID2D1PathGeometry)>,
+    /// When its read started, and how many of its icons haven't come yet (for the log).
+    since: Instant,
+    icons_left: usize,
+    /// The items showing the same icon, by the first of them (whose icon was asked for).
+    shared: HashMap<usize, Vec<usize>>,
+}
+
+/// A folder being read for its pop-up.
+struct FolderWait {
+    index: usize,
+    view: View,
+    trail: Vec<(String, PathBuf)>,
+    id: u64,
+    since: Instant,
 }
 
 /// Things dragged in from outside, over the dock: the gap they'd go into (None: not over it).
@@ -971,6 +1042,11 @@ impl Dock {
             drag: None,
             drag_window: None,
             group: None,
+            folder_icons: None,
+            folder_reads: Arc::new(Mutex::new(Vec::new())),
+            folder_reads_made: 0,
+            folder_running: HashMap::new(),
+            folder_waiting: None,
             child_press: None,
             popup_wrap_format: None,
             popup_window: None,
@@ -1316,6 +1392,7 @@ impl Dock {
 
     /// Takes finished icons from the worker and puts them on the dock.
     fn receive_icons(&mut self) {
+        self.receive_folder_icons();
         let Some(worker) = &self.icons else { return };
         let done: Vec<icons::Done> = worker.done.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
         let mut changed = false;
@@ -1533,7 +1610,7 @@ impl Dock {
         let all: Vec<Vec<IconSource>> = self
             .items
             .iter()
-            .flat_map(|item| std::iter::once(&item.sources).chain(item.children.iter().map(|child| &child.sources)))
+            .flat_map(|item| std::iter::once(&item.sources).chain(item.children.iter().filter(|_| item.cfg.kind == Kind::Group).map(|child| &child.sources)))
             .filter(|sources| !sources.is_empty() && !icons::on_network(sources))
             .cloned()
             .collect();
@@ -2169,7 +2246,7 @@ impl Dock {
         let is_group = |i: usize| self.items.get(i).is_some_and(|item| item.cfg.kind == Kind::Group);
         // Over an open group's pop-up: a place among its items.
         let in_popup = match &self.group {
-            Some(open) if !stays_out_of_groups && open.layout.covers(pt.x, pt.y) => {
+            Some(open) if open.folder.is_none() && !stays_out_of_groups && open.layout.covers(pt.x, pt.y) => {
                 Some((open.index, open.layout.gap_at((pt.x - open.layout.x) as f32, (pt.y - open.layout.y) as f32)))
             }
             _ => None,
@@ -3474,10 +3551,16 @@ impl Dock {
             self.show_notice(&tr!("{group} is empty: right-click an icon > Move to group", group = label));
             return;
         }
-        let Some(slot) = self.layout.slot_of(index) else { return };
+        self.show_popup(index, None);
+    }
+
+    /// Where a group's or a folder's pop-up goes, below its icon.
+    fn popup_params(&self, index: usize, count: usize, folder: Option<popup::FolderLook>) -> Option<popup::Params> {
+        let item = self.items.get(index)?;
+        let slot = self.layout.slot_of(index)?;
         let g = self.layout.geo;
-        let params = popup::Params {
-            count: item.children.len(),
+        Some(popup::Params {
+            count,
             icon: g.icon,
             scale: g.scale,
             line_h: (self.settings.label_size * 1.4 * g.scale).ceil(), // Segoe UI's own line height
@@ -3495,13 +3578,34 @@ impl Dock {
             screen_top: self.screen.work.top as f32,
             screen_bottom: self.screen.work.bottom as f32,
             edge: self.settings.edge,
+            folder,
+        })
+    }
+
+    /// Shows the pop-up of a group, or of a folder (`folder`), whose items are its `children`.
+    fn show_popup(&mut self, index: usize, folder: Option<FolderView>) {
+        let Some(item) = self.items.get(index) else { return };
+        // Going into a subfolder or back, the pop-up already open stays at least its size.
+        let at_least = match &self.group {
+            Some(open) if open.index == index && open.folder.is_some() && folder.is_some() => (open.layout.panel.width(), open.layout.panel.height()),
+            _ => (0.0, 0.0),
         };
+        // With nothing to show, room for saying why.
+        let (max_columns, max_rows) = (self.settings.folder_columns as usize, self.settings.folder_rows as usize);
+        let look = folder.as_ref().map(|f| popup::FolderLook { back: f.trail.len() > 1, max_columns, max_rows, at_least, note: f.note.is_some() });
+        let count = item.children.len();
+        let Some(params) = self.popup_params(index, count, look) else { return };
         if self.log_groups {
-            log_info!("opened group {} ({} items)", edit::label_of(&item.cfg), item.children.len());
+            let what = if folder.is_some() { "folder" } else { "group" };
+            log_info!("opened {what} {} ({} items)", edit::label_of(&item.cfg), item.children.len());
         }
         let layout = popup::layout(&params);
         let closer = popup::Closer::new(GROUP_CLOSE_GRACE);
-        self.group = Some(OpenGroup { index, layout, hovered: None, pressed: None, closer, tracking: false });
+        let mut folder = folder;
+        if let Some(f) = folder.as_mut() {
+            f.glyphs = self.button_glyphs(&layout);
+        }
+        self.group = Some(OpenGroup { index, layout, hovered: None, pressed: None, closer, tracking: false, folder });
         if self.drag.is_none() {
             system::forget_escape(); // only an Esc from now on closes it
         }
@@ -3516,6 +3620,399 @@ impl Dock {
         self.set_poll(25);
         if self.window_visible {
             self.render(); // its name under it gives way to the pop-up
+        }
+    }
+
+    // ---- Folders that show what's inside ----------------------------------------------------
+
+    /// A folder on the dock that shows what's inside: how, and where it is on disk, if this item
+    /// is one and it's there. (One on another computer isn't asked here: its reader finds out.)
+    fn folder_of(&self, index: usize) -> Option<(View, PathBuf)> {
+        let item = self.items.get(index)?;
+        let view = item.cfg.view();
+        if !view.shows_inside() {
+            return None;
+        }
+        let dir = places::on_disk(&self.home, item.cfg.launch_target());
+        (places::on_network(&dir) || Path::new(&dir).is_dir()).then(|| (view, PathBuf::from(dir)))
+    }
+
+    /// Clicked: reads the folder, and shows its pop-up once it's read.
+    fn open_folder(&mut self, index: usize, view: View, dir: PathBuf) {
+        self.close_group_now("a folder opened");
+        let name = self.items.get(index).map(|item| edit::shown_label_of(&item.cfg)).unwrap_or_default();
+        self.read_folder(index, view, vec![(name, dir)]);
+    }
+
+    /// Reads the last folder of `trail` in the background, for item `index`'s pop-up.
+    fn read_folder(&mut self, index: usize, view: View, trail: Vec<(String, PathBuf)>) {
+        let (Some(hwnd), Some((_, dir))) = (self.hwnd, trail.last()) else { return };
+        let id = match self.folder_running.get(dir) {
+            Some(&running) => running, // still being read (a slow server): wait for that answer
+            None => {
+                self.folder_reads_made += 1;
+                let id = self.folder_reads_made;
+                self.folder_running.insert(dir.clone(), id);
+                folder::read_in_background(id, dir.clone(), self.folder_reads.clone(), hwnd, WM_APP_FOLDER);
+                id
+            }
+        };
+        self.folder_waiting = Some(FolderWait { index, view, trail, id, since: Instant::now() });
+        self.start_timer(TIMER_FOLDER_SLOW, FOLDER_SLOW_MS);
+    }
+
+    /// A folder has been read: its pop-up shows what's inside, if it's still wanted.
+    fn receive_folder(&mut self) {
+        let answers: Vec<(u64, std::result::Result<Vec<folder::Entry>, folder::Failure>)> =
+            self.folder_reads.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
+        for (id, answer) in answers {
+            self.folder_running.retain(|_, running| *running != id);
+            if !self.folder_waiting.as_ref().is_some_and(|wait| wait.id == id) {
+                continue; // closed meanwhile, or another folder clicked
+            }
+            let Some(wait) = self.folder_waiting.take() else { continue };
+            self.stop_timer(TIMER_FOLDER_SLOW);
+            let name = wait.trail.last().map(|(name, _)| name.clone()).unwrap_or_default();
+            if let (Err(failure), true) = (&answer, self.log_groups) {
+                log_info!("folder {name} couldn't be read: {failure:?}");
+            }
+            let content = answer.map_err(|failure| match failure {
+                folder::Failure::Gone => tr!("{folder} isn't there any more", folder = name).to_string(),
+                folder::Failure::Unreachable => tr!("{folder} can't be reached", folder = name).to_string(),
+                folder::Failure::Denied => tr!("Windows didn't allow opening {folder}", folder = name).to_string(),
+                folder::Failure::Other => tr!("{folder} couldn't be opened", folder = name).to_string(),
+            });
+            self.show_folder(wait.index, wait.view, wait.trail, id, wait.since, content);
+        }
+    }
+
+    /// A folder that hasn't answered yet: its pop-up says so, and fills in if the answer comes.
+    fn folder_slow(&mut self) {
+        let Some(wait) = &self.folder_waiting else { return };
+        let (index, view, trail, id, since) = (wait.index, wait.view, wait.trail.clone(), wait.id, wait.since);
+        let name = trail.last().map(|(name, _)| name.clone()).unwrap_or_default();
+        log_info!("folder {name} isn't answering");
+        self.show_folder(index, view, trail, id, since, Err(tr!("{folder} isn't answering", folder = name).to_string()));
+        // Still waiting for it: `folder_waiting` stays.
+        if let Some(wait) = self.folder_waiting.as_mut() {
+            wait.id = id;
+        }
+    }
+
+    /// Shows what a folder holds (or why there's nothing to show) in item `index`'s pop-up.
+    fn show_folder(&mut self, index: usize, view: View, trail: Vec<(String, PathBuf)>, listing: u64, since: Instant, content: std::result::Result<Vec<folder::Entry>, String>) {
+        let Some(dir) = trail.last().map(|(_, dir)| dir.clone()) else { return };
+        let network = places::on_network(&dir.to_string_lossy());
+        let (mut entries, note) = match content {
+            Ok(entries) => (entries, None),
+            Err(why) => (Vec::new(), Some(why)),
+        };
+        let all = entries.len();
+        // "Without scrolling": as many as fit the grid, the last tile opening the rest in File
+        // Explorer.
+        let fits = (self.settings.folder_columns * self.settings.folder_rows) as usize;
+        let capped = view == View::GridFit && all > fits;
+        if capped {
+            entries.truncate(fits - 1);
+        }
+        let child = |name: String, target: String, sources: Vec<IconSource>| Child {
+            label: name.encode_utf16().collect(),
+            cfg: ItemConfig::new(name, target),
+            sources,
+            icon: None,
+            preview: None,
+        };
+        let mut children: Vec<Child> =
+            entries.iter().map(|e| child(e.name.clone(), e.path.to_string_lossy().into_owned(), folder::icon_sources(e, network))).collect();
+        let mut dirs: Vec<bool> = entries.iter().map(|e| e.is_dir).collect();
+        if capped {
+            let shown = tr!("Show all {n} in File Explorer", n = all).to_string();
+            children.push(child(shown, dir.to_string_lossy().into_owned(), vec![IconSource::FileType(folder::FOLDER_TYPE.into())]));
+            dirs.push(false);
+        }
+        let note = note.or_else(|| children.is_empty().then(|| tr!("This folder is empty").to_string()));
+        // One icon asked for, and one picture kept, for all the items that show the same one (a
+        // folder of 140 PDFs needs one).
+        let mut first_with: HashMap<&[IconSource], usize> = HashMap::new();
+        let mut shared: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (k, c) in children.iter().enumerate() {
+            let first = *first_with.entry(c.sources.as_slice()).or_insert(k);
+            shared.entry(first).or_default().push(k);
+        }
+        let mut asks: Vec<(usize, Vec<IconSource>)> = shared.keys().map(|&k| (k, children[k].sources.clone())).collect();
+        asks.sort_by_key(|(k, _)| *k); // in order, so the first ones in sight come first
+        drop(first_with);
+        let size = self.layout.geo.icon as u32;
+        if let Some(worker) = self.folder_icon_worker() {
+            for (k, sources) in asks.iter().cloned() {
+                worker.request(Job { generation: listing, item: index, size, part: Part::Child(k), sources, also: None });
+            }
+        }
+        let Some(item) = self.items.get_mut(index) else { return };
+        let (shown, icons_left) = (children.len(), asks.len());
+        item.children = children;
+        if self.log_groups {
+            let name = trail.last().map(|(name, _)| name.as_str()).unwrap_or_default();
+            log_info!("folder {name}: {shown} shown of {all}, read in {} ms", since.elapsed().as_millis());
+            log_info!("folder {name}: {icons_left} different icons");
+        }
+        let note = note.map(|n| n.encode_utf16().collect());
+        let folder = FolderView {
+            view,
+            trail,
+            listing,
+            dirs,
+            capped,
+            note,
+            button: None,
+            pressed_button: None,
+            aim: None,
+            wheel_rest: 0,
+            frames: (0, Duration::ZERO, Instant::now()),
+            bar_hot: false,
+            bar_drag: None,
+            glyphs: Vec::new(),
+            since,
+            icons_left,
+            shared,
+        };
+        self.show_popup(index, Some(folder));
+        if let Some(open) = self.group.as_ref().filter(|open| open.folder.is_some() && self.log_groups) {
+            log_info!("folder pop-up {} x {} px", open.layout.width, open.layout.height);
+        }
+    }
+
+    /// The worker that makes a folder's icons, into a cache folder of its own (kept from one
+    /// opening to the next, but emptied once it holds a great many).
+    fn folder_icon_worker(&mut self) -> Option<&IconWorker> {
+        if self.folder_icons.is_none() {
+            let hwnd = self.hwnd?;
+            let cache = self.home.icon_cache().join("folders");
+            if std::fs::read_dir(&cache).map(|list| list.count()).unwrap_or(0) > FOLDER_ICONS_KEEP {
+                let _ = std::fs::remove_dir_all(&cache);
+            }
+            self.folder_icons = Some(IconWorker::start_in(cache, hwnd, WM_APP_ICONS, self.safe_mode));
+        }
+        self.folder_icons.as_ref()
+    }
+
+    /// Takes a folder's finished icons into its open pop-up (set aside if it's closed or showing
+    /// another folder by now).
+    fn receive_folder_icons(&mut self) {
+        let Some(worker) = &self.folder_icons else { return };
+        let done: Vec<icons::Done> = worker.done.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
+        let Some((index, listing)) = self.group.as_ref().and_then(|open| Some((open.index, open.folder.as_ref()?.listing))) else { return };
+        let mut changed = false;
+        for result in done {
+            let Part::Child(k) = result.part else { continue };
+            if result.generation != listing || result.item != index {
+                continue;
+            }
+            let bitmap = result.pixels.and_then(|p| self.renderer.bitmap(&p).ok());
+            // The one picture, for every item showing that icon.
+            let same = self.group.as_ref().and_then(|open| open.folder.as_ref()).and_then(|f| f.shared.get(&k).cloned()).unwrap_or_else(|| vec![k]);
+            if let Some(item) = self.items.get_mut(index) {
+                for j in same {
+                    if let Some(child) = item.children.get_mut(j) {
+                        child.icon = bitmap.clone();
+                        changed = true;
+                    }
+                }
+            }
+            if let Some(f) = self.group.as_mut().and_then(|open| open.folder.as_mut()).filter(|f| f.icons_left > 0) {
+                f.icons_left -= 1;
+                if f.icons_left == 0 && self.log_groups {
+                    log_info!("folder icons all in, {} ms after its click", f.since.elapsed().as_millis());
+                }
+            }
+        }
+        if changed {
+            self.render_popup();
+        }
+    }
+
+    /// The lines of a folder pop-up's buttons, made once with its layout.
+    fn button_glyphs(&self, layout: &popup::Layout) -> Vec<(popup::Button, ID2D1PathGeometry)> {
+        let scale = self.layout.geo.scale;
+        let mut glyphs = Vec::new();
+        for (button, _) in &layout.buttons {
+            for line in layout.glyph(*button, scale) {
+                let points: Vec<Vector2> = line.iter().map(|&(x, y)| Vector2 { X: x, Y: y }).collect();
+                if let Some(path) = self.renderer.polyline(&points) {
+                    glyphs.push((*button, path));
+                }
+            }
+        }
+        glyphs
+    }
+
+    /// One of a folder pop-up's buttons, clicked.
+    fn folder_button(&mut self, button: popup::Button) -> Option<Action> {
+        let open = self.group.as_ref()?;
+        let index = open.index;
+        let f = open.folder.as_ref()?;
+        let (view, mut trail) = (f.view, f.trail.clone());
+        match button {
+            popup::Button::Back => {
+                trail.pop();
+                if !trail.is_empty() {
+                    self.read_folder(index, view, trail);
+                }
+                None
+            }
+            popup::Button::Explore => {
+                let (name, dir) = trail.last()?.clone();
+                self.close_group("opened in File Explorer");
+                self.launch_effect(index);
+                Some(Action::Launch(ItemConfig::new(name, dir.to_string_lossy()), index, self.generation))
+            }
+        }
+    }
+
+    /// Whether a folder pop-up's scroll bar thumb is being dragged.
+    fn bar_dragged(&self) -> bool {
+        self.group.as_ref().and_then(|open| open.folder.as_ref()).is_some_and(|f| f.bar_drag.is_some())
+    }
+
+    /// The scroll bar's thumb, dragged with the pointer at window y `y`: the items follow it.
+    fn drag_bar(&mut self, y: f32) {
+        let Some(open) = self.group.as_mut() else { return };
+        let Some(grip) = open.folder.as_ref().and_then(|f| f.bar_drag) else { return };
+        let to = open.layout.scroll_for_thumb(y - grip);
+        if (to - open.layout.scroll).abs() >= 0.5 {
+            open.layout.scroll = to;
+            self.render_popup();
+        }
+    }
+
+    /// Lets go of the scroll bar's thumb: the items settle on the nearest whole row.
+    fn drop_bar(&mut self) {
+        let Some(f) = self.group.as_mut().and_then(|open| open.folder.as_mut()) else { return };
+        if f.bar_drag.take().is_none() {
+            return;
+        }
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        self.scroll_rows(0);
+        self.rehover_popup();
+        self.render_popup();
+    }
+
+    /// Something in a folder's pop-up, clicked (or Open in its menu: `explicit`): a folder goes
+    /// inside, anything else opens.
+    fn folder_click(&mut self, index: usize, k: usize, explicit: bool) -> Option<Action> {
+        let open = self.group.as_ref()?;
+        let f = open.folder.as_ref()?;
+        let is_dir = f.dirs.get(k).copied().unwrap_or(false);
+        let last = f.capped && k + 1 == f.dirs.len();
+        let (view, mut trail) = (f.view, f.trail.clone());
+        let child = self.items.get(index)?.children.get(k)?.cfg.clone();
+        if is_dir {
+            trail.push((child.name.clone(), PathBuf::from(&child.target)));
+            self.read_folder(index, view, trail);
+            return None;
+        }
+        // Opening with a double click, a file needs one here too (a folder goes inside at once).
+        if self.settings.double_click && !self.second_press && !last && !explicit {
+            self.lone_click(Pressed::Child(index, k), &child.name, false);
+            return None;
+        }
+        self.close_group(if last { "opened in File Explorer" } else { "launched an item" });
+        self.launch_effect(index);
+        Some(Action::Launch(child, index, self.generation))
+    }
+
+    /// The mouse wheel on a folder's pop-up: a row a notch. A touchpad's or a fine wheel's small
+    /// turns add up to a notch first, as on the dock.
+    fn popup_wheel(&mut self, wparam: WPARAM) {
+        let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+        let Some(f) = self.group.as_mut().and_then(|open| open.folder.as_mut()) else { return };
+        f.wheel_rest -= delta; // turned toward you: on down the folder
+        let rows = f.wheel_rest / WHEEL_NOTCH;
+        if rows == 0 {
+            return;
+        }
+        f.wheel_rest -= rows * WHEEL_NOTCH;
+        self.scroll_rows(rows.clamp(-6, 6));
+    }
+
+    /// A page up or down: the rows showing less one, so the last row seen stays in sight.
+    fn scroll_pages(&mut self, pages: i32) {
+        let Some(open) = &self.group else { return };
+        let page = (open.layout.shown_rows() as i32 - 1).max(1);
+        self.scroll_rows(pages * page);
+    }
+
+    /// Sends a folder's items `rows` rows on (back if negative) from where they're going; they
+    /// glide there in the dock's frames (`step_popup_scroll`). Another turn of the wheel on the
+    /// way only moves where they're going: the glide carries on, it doesn't start again.
+    fn scroll_rows(&mut self, rows: i32) {
+        let reduced = self.reduced_motion;
+        let Some(open) = self.group.as_mut() else { return };
+        let Some(f) = open.folder.as_mut() else { return };
+        if open.layout.max_scroll <= 0.0 {
+            return;
+        }
+        let from = f.aim.unwrap_or(open.layout.scroll);
+        let to = open.layout.scrolled(from, rows);
+        if (to - open.layout.scroll).abs() < 0.5 && f.aim.is_none() {
+            return;
+        }
+        if reduced {
+            open.layout.scroll = to;
+            f.aim = None;
+            self.rehover_popup();
+            self.render_popup();
+            return;
+        }
+        if f.aim.is_none() {
+            f.frames = (0, Duration::ZERO, Instant::now());
+        }
+        f.aim = Some(to);
+    }
+
+    /// A frame of a folder pop-up gliding to where it's scrolling: a share of the way that
+    /// depends only on the time since the last frame (so it moves as smoothly at any frame rate
+    /// and carries straight on when sent further), settling exactly on its row. Drawn in step
+    /// with the screen (the dock's frames wait for each refresh). Whether it's still moving.
+    fn step_popup_scroll(&mut self, dt: f32) -> bool {
+        let reduced = self.reduced_motion;
+        let Some(open) = self.group.as_mut() else { return false };
+        let Some(f) = open.folder.as_mut() else { return false };
+        let Some(aim) = f.aim else { return false };
+        let share = if reduced { 1.0 } else { 1.0 - (-dt * POPUP_SCROLL_RATE).exp() };
+        let scroll = open.layout.scroll + (aim - open.layout.scroll) * share;
+        let settled = (aim - scroll).abs() < 1.0;
+        open.layout.scroll = if settled { aim } else { scroll };
+        if settled {
+            f.aim = None;
+        }
+        self.rehover_popup();
+        let drawing = Instant::now();
+        self.render_popup();
+        let took = drawing.elapsed();
+        if let Some(f) = self.group.as_mut().and_then(|open| open.folder.as_mut()) {
+            let (frames, slowest, since) = f.frames;
+            f.frames = (frames + 1, slowest.max(took), since);
+            if settled && self.log_groups {
+                log_info!("folder scroll: {} frames in {} ms, the slowest drawn in {:.1} ms", frames + 1, since.elapsed().as_millis(), slowest.max(took).as_secs_f64() * 1000.0);
+            }
+        }
+        !settled
+    }
+
+    /// What's under the pointer in the pop-up now (after it scrolled under a still pointer).
+    fn rehover_popup(&mut self) {
+        let Some(pt) = system::cursor_pos() else { return };
+        let Some(open) = self.group.as_mut() else { return };
+        let (x, y) = ((pt.x - open.layout.x) as f32, (pt.y - open.layout.y) as f32);
+        open.hovered = open.layout.hit(x, y);
+        let button = open.layout.button_at(x, y);
+        let on_bar = open.layout.bar_at(x, y).is_some();
+        if let Some(f) = open.folder.as_mut() {
+            f.button = button;
+            f.bar_hot = on_bar;
         }
     }
 
@@ -3570,6 +4067,14 @@ impl Dock {
     fn end_group(&mut self, why: &str) {
         let Some(open) = self.group.take() else { return };
         self.child_press = None;
+        if open.folder.is_some() {
+            // Nothing about a folder's contents is kept: its icons are freed with it (and a glide
+            // under way goes with it).
+            self.folder_waiting = None;
+            if let Some(item) = self.items.get_mut(open.index) {
+                item.children.clear();
+            }
+        }
         if matches!(self.hint, Some(Pressed::Child(..))) {
             self.hint = None;
         }
@@ -3613,11 +4118,34 @@ impl Dock {
                 ghost: dragged == Some(k),
             })
             .collect();
-        let name: Vec<u16> = edit::shown_label_of(&item.cfg).encode_utf16().collect();
+        // A folder's title is where it is: the folder it's in, then its own name.
+        let name: Vec<u16> = match open.folder.as_ref().map(|f| &f.trail) {
+            Some(trail) if trail.len() > 1 => format!("{} \u{203a} {}", trail[trail.len() - 2].0, trail[trail.len() - 1].0).encode_utf16().collect(),
+            Some(trail) if !trail.is_empty() => trail[0].0.encode_utf16().collect(),
+            _ => edit::shown_label_of(&item.cfg).encode_utf16().collect(),
+        };
         let fonts = popup::Fonts { name: name_font, wrapped, title };
-        let state = popup::State { hovered: open.hovered, marker };
+        let f = open.folder.as_ref();
+        let state = popup::State {
+            hovered: open.hovered,
+            marker,
+            button: f.and_then(|f| f.button),
+            bar_hot: f.is_some_and(|f| f.bar_hot),
+            bar_dragged: f.is_some_and(|f| f.bar_drag.is_some()),
+        };
         let measure = |text: &[u16], width: f32| self.text_height_in(text, wrapped, width);
-        popup::draw(&self.renderer.rt, &self.brush, &fonts, &open.layout, &name, &shown, state, self.layout.geo.scale, &measure);
+        let note = open.folder.as_ref().and_then(|f| f.note.as_deref());
+        let scale = self.layout.geo.scale;
+        popup::draw(&self.renderer.rt, &self.brush, &fonts, &open.layout, &name, &shown, state, scale, &measure, note);
+        if let Some(f) = &open.folder {
+            for (button, line) in &f.glyphs {
+                let alpha = if f.button == Some(*button) { 1.0 } else { 0.78 };
+                unsafe {
+                    self.brush.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: alpha });
+                }
+                self.renderer.stroke(line, &self.brush, (1.6 * scale).max(1.0));
+            }
+        }
         self.renderer.end().is_ok()
     }
 
@@ -3635,8 +4163,18 @@ impl Dock {
         if msg == WM_MOUSEACTIVATE {
             return (Some(LRESULT(MA_NOACTIVATE as isize)), None); // never takes the focus
         }
-        // Dragging an item out of the pop-up (the pop-up holds the mouse meanwhile).
+        // Dragging an item out of the pop-up, or a folder's scroll bar (the pop-up holds the mouse
+        // meanwhile).
         match msg {
+            WM_MOUSEMOVE if self.bar_dragged() => {
+                let (_, y) = point_from_lparam(lparam);
+                self.drag_bar(y as f32);
+                return (done, None);
+            }
+            WM_LBUTTONUP if self.bar_dragged() => {
+                self.drop_bar();
+                return (done, None);
+            }
             WM_MOUSEMOVE if self.drag.is_some() => {
                 self.update_drag();
                 return (done, None);
@@ -3654,6 +4192,12 @@ impl Dock {
                 if lparam.0 != self.popup_window.map_or(0, |window| window.0 as isize) {
                     self.child_press = None;
                     self.cancel_drag();
+                    // The mouse taken away mid-drag of the scroll bar: it settles where it is.
+                    if let Some(f) = self.group.as_mut().and_then(|open| open.folder.as_mut()).filter(|f| f.bar_drag.is_some()) {
+                        f.bar_drag = None;
+                        self.scroll_rows(0);
+                        self.render_popup();
+                    }
                 }
                 return (done, None);
             }
@@ -3674,12 +4218,23 @@ impl Dock {
                         }
                     }
                 }
+                let button = open.folder.as_ref().and_then(|_| open.layout.button_at(x as f32, y as f32));
+                let on_bar = open.layout.bar_at(x as f32, y as f32).is_some();
+                let mut redraw = false;
+                if let Some(f) = open.folder.as_mut().filter(|f| f.button != button || f.bar_hot != on_bar) {
+                    f.button = button;
+                    f.bar_hot = on_bar;
+                    redraw = true;
+                }
                 if open.hovered != at {
                     open.hovered = at;
                     // Off the item that said how to open it: its name again.
                     if matches!(self.hint, Some(Pressed::Child(..))) {
                         self.hint = None;
                     }
+                    redraw = true;
+                }
+                if redraw {
                     self.render_popup();
                 }
                 (done, None)
@@ -3689,10 +4244,65 @@ impl Dock {
                 if matches!(self.hint, Some(Pressed::Child(..))) {
                     self.hint = None;
                 }
-                if open.hovered.take().is_some() {
+                let had_button = open.folder.as_mut().and_then(|f| f.button.take()).is_some();
+                let had_bar = open.folder.as_mut().is_some_and(|f| std::mem::take(&mut f.bar_hot));
+                if open.hovered.take().is_some() || had_button || had_bar {
                     self.render_popup();
                 }
                 (done, None)
+            }
+            WM_LBUTTONDOWN if open.folder.is_some() => {
+                // The scroll bar: take hold of its thumb, or go a page toward the click.
+                if let Some(part) = open.layout.bar_at(x as f32, y as f32) {
+                    open.pressed = None;
+                    let thumb_top = open.layout.thumb().map_or(0.0, |(top, _)| top);
+                    if let Some(f) = open.folder.as_mut() {
+                        f.pressed_button = None;
+                        if part == popup::BarPart::Thumb {
+                            f.bar_drag = Some(y as f32 - thumb_top);
+                            f.aim = None; // held where it is: the drag moves it now
+                        }
+                    }
+                    match part {
+                        popup::BarPart::Thumb => {
+                            if let Some(window) = self.popup_window {
+                                unsafe {
+                                    SetCapture(window);
+                                }
+                            }
+                            self.render_popup();
+                        }
+                        popup::BarPart::Above => self.scroll_pages(-1),
+                        popup::BarPart::Below => self.scroll_pages(1),
+                    }
+                    return (done, None);
+                }
+                // What's inside a folder is opened from here, never dragged about.
+                let button = open.layout.button_at(x as f32, y as f32);
+                if let Some(f) = open.folder.as_mut() {
+                    f.pressed_button = button;
+                }
+                open.pressed = if button.is_some() { None } else { at };
+                let index = open.index;
+                self.note_press(at.filter(|_| button.is_none()).map(|k| Pressed::Child(index, k)));
+                (done, None)
+            }
+            WM_LBUTTONUP if open.folder.is_some() => {
+                let button = open.layout.button_at(x as f32, y as f32);
+                let pressed_button = open.folder.as_mut().and_then(|f| f.pressed_button.take());
+                let (index, pressed) = (open.index, open.pressed.take());
+                if let Some(button) = button.filter(|&b| Some(b) == pressed_button) {
+                    return (done, self.folder_button(button));
+                }
+                let Some(k) = pressed.filter(|&k| Some(k) == at) else { return (done, None) };
+                (done, self.folder_click(index, k, false))
+            }
+            WM_RBUTTONUP if open.folder.is_some() => {
+                let index = open.index;
+                match (at, system::cursor_pos()) {
+                    (Some(k), Some(pt)) => (done, Some(Action::FolderMenu(pt, index, k))),
+                    _ => (done, None),
+                }
             }
             WM_LBUTTONDOWN => {
                 log_info!("pop-up: press on {at:?}");
@@ -3961,7 +4571,7 @@ impl Dock {
             }
             // An open group never has the keyboard focus, so the dock looks: Esc, a click
             // anywhere else, or the pointer away from the dock and the pop-up for a moment.
-            if self.group.is_some() && !self.menu_open && self.drag.is_none() && self.child_press.is_none() {
+            if self.group.is_some() && !self.menu_open && self.drag.is_none() && self.child_press.is_none() && !self.bar_dragged() {
                 let on_popup = self.group.as_ref().is_some_and(|open| open.layout.covers(pt.x, pt.y));
                 let inside = over || on_popup;
                 let seen = popup::Seen { inside, button_outside: !inside && system::mouse_buttons_down(), escape: system::escape_pressed() };
@@ -4471,13 +5081,25 @@ impl Dock {
                         let now = Instant::now();
                         // Opening with a double click, one click opens nothing (a group still
                         // opens with one), though it closes an open group as any click does.
-                        if self.settings.double_click && self.items[pressed].cfg.kind != Kind::Group && !self.second_press {
+                        let folder = self.folder_of(pressed);
+                        if self.settings.double_click && self.items[pressed].cfg.kind != Kind::Group && folder.is_none() && !self.second_press {
                             self.close_group("another item clicked");
                             self.lone_click(Pressed::Item(pressed), &edit::label_of(&self.items[pressed].cfg), self.clicks.holds(pressed, now));
                             return (done, None);
                         }
                         if !self.clicks.allow(pressed, now) {
                             log_info!("click on {} ignored: the second half of a double-click", edit::label_of(&self.items[pressed].cfg));
+                            return (done, None);
+                        }
+                        // A folder showing what's inside opens as a group does.
+                        if let Some((view, dir)) = folder {
+                            let open_here = self.group.as_ref().is_some_and(|open| open.index == pressed);
+                            if open_here || self.folder_waiting.as_ref().is_some_and(|wait| wait.index == pressed) {
+                                self.folder_waiting = None;
+                                self.close_group("its icon clicked again");
+                            } else {
+                                self.open_folder(pressed, view, dir);
+                            }
                             return (done, None);
                         }
                         // A group opens (or, already open, closes); anything else closes it.
@@ -4671,6 +5293,15 @@ impl Dock {
                 self.receive_icons();
                 (done, None)
             }
+            WM_APP_FOLDER => {
+                self.receive_folder();
+                (done, None)
+            }
+            WM_TIMER if wparam.0 == TIMER_FOLDER_SLOW => {
+                self.stop_timer(TIMER_FOLDER_SLOW);
+                self.folder_slow();
+                (done, None)
+            }
             WM_APP_BIN => {
                 self.receive_bin_state();
                 (done, None)
@@ -4691,9 +5322,28 @@ impl Dock {
                 }
                 if let Some(open) = &self.group {
                     for (cell, child) in open.layout.cells.iter().zip(&self.items[open.index].children) {
+                        let cy = (cell.icon.top + cell.icon.bottom) / 2.0 - open.layout.scroll;
+                        if open.folder.is_some() && (cy < open.layout.view.top || cy > open.layout.view.bottom) {
+                            continue; // scrolled out of sight
+                        }
                         let x = open.layout.x + ((cell.icon.left + cell.icon.right) / 2.0) as i32;
-                        let y = open.layout.y + ((cell.icon.top + cell.icon.bottom) / 2.0) as i32;
+                        let y = open.layout.y + cy as i32;
                         log_info!("TEST where: in group {} at {x},{y}", edit::label_of(&child.cfg));
+                    }
+                    for (button, rect) in &open.layout.buttons {
+                        let x = open.layout.x + ((rect.left + rect.right) / 2.0) as i32;
+                        let y = open.layout.y + ((rect.top + rect.bottom) / 2.0) as i32;
+                        log_info!("TEST where: pop-up button {button:?} at {x},{y}");
+                    }
+                    if let (Some(bar), Some((top, bottom))) = (open.layout.bar, open.layout.thumb()) {
+                        let (x, y) = (open.layout.x + bar.x as i32, open.layout.y);
+                        log_info!(
+                            "TEST where: pop-up scroll bar at x {x}, from {} to {}, thumb from {} to {}",
+                            y + bar.top as i32,
+                            y + bar.bottom as i32,
+                            y + top as i32,
+                            y + bottom as i32
+                        );
                     }
                 }
                 log_info!("TEST where end {}", wparam.0);
@@ -4854,6 +5504,7 @@ impl Dock {
 
     fn needs_frames(&self) -> bool {
         self.popup_fading.is_some()
+            || self.group.as_ref().and_then(|open| open.folder.as_ref()).is_some_and(|f| f.aim.is_some())
             || self.scroll_since.is_some()
             || self.arrow_glow != self.arrow_glow_goal()
             || self.reveal != self.reveal_target
@@ -4919,6 +5570,8 @@ impl Dock {
         }
 
         self.fade_popup();
+        // A folder's pop-up scrolling (it's drawn on its own; the dock needn't be).
+        self.step_popup_scroll(dt);
         let content_changing = !self.slide_by_moving
             || scrolling
             || arrows_glowing
@@ -5548,6 +6201,10 @@ unsafe extern "system" fn popup_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     if msg == WM_MOUSEACTIVATE {
         return LRESULT(MA_NOACTIVATE as isize); // never takes the focus, even between groups
     }
+    if msg == WM_MOUSEWHEEL {
+        with_dock(|dock| dock.popup_wheel(wparam));
+        return LRESULT(0);
+    }
     let (result, action) = with_dock(|dock| dock.handle_popup(msg, lparam)).unwrap_or((None, None));
     if (WM_MOUSEFIRST..=WM_MOUSELAST).contains(&msg) || msg == WM_CAPTURECHANGED {
         with_dock(|dock| dock.sync_capture());
@@ -5569,6 +6226,7 @@ fn run_action(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Menu(pt, item)) => show_menu(hwnd, pt, item),
         Some(Action::ChildMenu(pt, group, child)) => show_child_menu(hwnd, pt, group, child),
+        Some(Action::FolderMenu(pt, index, k)) => show_folder_menu(hwnd, pt, index, k),
         Some(Action::Error(message)) => show_error(&message),
         Some(Action::FileError(message)) => system::warning(message),
         Some(Action::ConfirmReplace(index, label, new)) => confirm_replace(index, &label, &new),
@@ -5594,6 +6252,58 @@ fn run_action(hwnd: HWND, action: Option<Action>) {
         None => {}
     }
 }
+
+/// Right-click on something in a folder's pop-up: open it, or show where it is. What's in the
+/// folder is changed in File Explorer, not here.
+fn show_folder_menu(hwnd: HWND, pt: POINT, index: usize, k: usize) {
+    let facts = with_dock(|dock| {
+        let child = dock.items.get(index)?.children.get(k)?;
+        let f = dock.group.as_ref()?.folder.as_ref()?;
+        let last = f.capped && k + 1 == f.dirs.len();
+        let target = child.cfg.target.clone();
+        dock.menu_open = true;
+        Some((target, last))
+    })
+    .flatten();
+    let Some((target, last)) = facts else { return };
+    let choice = unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            with_dock(|dock| dock.menu_open = false);
+            return;
+        };
+        let _ = AppendMenuW(menu, MF_STRING, FOLDER_OPEN, &wtr!("Open"));
+        if !last {
+            let _ = AppendMenuW(menu, MF_STRING, FOLDER_LOCATION, &wtr!("Open file location"));
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &wtr!("What's in the folder: change it in File Explorer"));
+        let _ = SetForegroundWindow(hwnd);
+        let flags = TPM_RETURNCMD.0 | TPM_RIGHTBUTTON.0 | TPM_TOPALIGN.0 | TPM_LEFTALIGN.0;
+        let choice = TrackPopupMenuEx(menu, flags, pt.x, pt.y, hwnd, None);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        choice.0 as usize
+    };
+    with_dock(|dock| dock.menu_open = false);
+    match choice {
+        FOLDER_OPEN => {
+            log_info!("menu: Open (in a folder)");
+            let action = with_dock(|dock| dock.folder_click(index, k, true)).flatten();
+            run_action(hwnd, action);
+        }
+        FOLDER_LOCATION => {
+            log_info!("menu: Open file location (in a folder)");
+            if let Err(e) = system::open_location(&target) {
+                show_error(&e);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A folder pop-up's menu (`show_folder_menu`).
+const FOLDER_OPEN: usize = 1;
+const FOLDER_LOCATION: usize = 2;
 
 /// Right-click on an item in a group's pop-up: take it out onto the dock, remove it, or open its
 /// properties.
@@ -6440,6 +7150,7 @@ pub fn churn(config: Config, home: Home, rounds: u32) -> Result<String> {
         IconSource::Resource(..) => "icon in exe/dll",
         IconSource::Shell(_) => "shell",
         IconSource::RecycleBin { .. } => "recycle bin",
+        IconSource::FileType(_) => "file type",
     };
     let mut report = format!("churn: {} items, icon {size} px, {rounds} rounds each\n", dock.items.len());
     for name in ["image file", "icon in exe/dll", "shell", "recycle bin"] {

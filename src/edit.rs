@@ -302,6 +302,9 @@ pub fn item_table(item: &ItemConfig) -> Table {
     if item.admin {
         table["admin"] = toml_edit::value(true);
     }
+    if !item.view.trim().is_empty() {
+        table["view"] = literal(&item.view);
+    }
     table.decor_mut().set_prefix("\n"); // a blank line before each [[item]], like the rest
     table
 }

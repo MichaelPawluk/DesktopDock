@@ -11,6 +11,7 @@ A lightweight dock for Windows 11. It stays hidden at the top of your screen (or
 - **Out of the way until you need it:** move your mouse to the top of the screen and the dock slides down. It can sit on the bottom or either side instead, beside the taskbar if it's there too, and it can stay out instead of hiding. Icons grow as you hover over them and show their names. It stays hidden while you're in a fullscreen game or video.
 - **Drag and drop:** add files, folders, programs and links by dragging them from File Explorer, the Start menu or a browser. Drop a file on a program's icon to open it with that program, or on the Recycle Bin to delete it.
 - **Groups:** put related items together under one icon that opens a pop-up.
+- **Folders that open in place:** a folder on the dock can show what's inside in a pop-up, subfolders and all, instead of opening File Explorer.
 - **Windows items:** add This PC, Downloads, Control Panel, Settings, Show desktop and more.
 - **Hard to break:** every change can be undone, recently removed items can be put back, and your dock is backed up automatically.
 - **Finds moved programs:** when an update moves a program, for example Photoshop 2026 being replaced by Photoshop 2027, the dock finds the new version on its own.
@@ -57,7 +58,15 @@ Desktop Dock installs for your user account only, in `%LOCALAPPDATA%\Programs\De
 - **Open something:** click its icon. To open things with a double click instead, tick Dock settings > Behaviour > *Open items with a double click* (a group still opens with one click).
 - **Add something:** drag it onto the dock, or right-click the dock and choose Add (File, Folder, Separator, Recycle Bin, or a Windows item).
 - **Rearrange:** drag icons to new spots. To remove one, drag it off the dock. An Undo button appears for a few seconds, and right-click > Put back restores anything removed recently.
-- **Groups:** right-click an icon > Move to group > New group, or drag an icon onto an existing group. Click a group to open it, then drag items in, out or around inside it.
+- **Groups:** right-click an icon > Move to group > New group, or drag an icon onto an existing group. Click a group to open it, then drag items in, out or around inside it. To fill a group from a folder, select the folder's files in File Explorer (Ctrl+A) and drag them onto the group's icon together.
+- **See what's in a folder:** right-click a folder on the dock > Properties > When clicked > *Show what's inside*. A click on it then shows its contents in a pop-up instead of opening File Explorer:
+  - Click a subfolder to go inside it, and the arrow at the top left to go back. The button at the top right opens the folder you're looking at in File Explorer.
+  - It's 4 across, and past 5 rows it scrolls: use the mouse wheel, or drag the thin bar on the right. Dock settings > Screen > Folders that show what's inside sets how many across and how many rows.
+  - *Show what's inside, without scrolling* shows as many as fit, with a last tile that opens the rest in File Explorer.
+
+  The folder is read each time you click it, so it's always up to date, and nothing is kept about its files. Each file shows its type's icon, not a preview (programs and shortcuts on this PC show their own). Files kept only online, in OneDrive for example, aren't downloaded to show them. What's in the folder is changed in File Explorer, not on the dock. Dock settings > Items has the same choice.
+
+  <img src="docs/images/folder.png" alt="Documents showing what's inside" width="70%">
 - **Lock icons:** right-click > Lock icons prevents accidental dragging. Hold Ctrl to move an icon anyway.
 - **Keep it out:** right-click > Hide automatically (untick it) and the dock stays out instead of hiding. Dock settings > Behaviour chooses whether it stays behind your windows (rest the pointer at the edge to bring it over them, or push it against the edge where the taskbar is), always behind them, full-screen programs included (only the keyboard shortcut brings it over them) or on top of them.
 - **More icons than fit:** they shrink until the dock fits the screen. To keep their size instead, choose Dock settings > Screen > When the icons don't fit > *Keep their size, scroll with arrows*: the arrows at the dock's ends, or the mouse wheel, move along, and holding a dragged icon on an arrow scrolls so you can drop it anywhere.

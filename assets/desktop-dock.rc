@@ -36,19 +36,21 @@ END
 // must match the constants in src/settings.rs.
 
 // The window: sections on the left (drawn by the window, Windows 11 style), the section's
-// title and its page on the right (page area 94,26 - 464,272: pages are 370 x 246). At most
+// title and its page on the right (page area 110,26 - 480,272: pages are 370 x 246). At most
 // 300 units tall, so it fits a 1080-line laptop screen at 150% (a unit test checks every page).
-100 DIALOGEX 0, 0, 470, 300
+// The layouts are in units of this 9-point font; the text shows a point larger (chrome.rs), so
+// controls leave room for that.
+100 DIALOGEX 0, 0, 486, 300
 STYLE DS_SHELLFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Desktop Dock settings"
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
-  CONTROL         "", 1001, "ListBox", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_TABSTOP, 4, 6, 84, 288
-  LTEXT           "", 1004, 94, 4, 370, 20
-  LTEXT           "Changes show on the dock as you make them.", 1002, 94, 277, 222, 18
-  PUSHBUTTON      "Revert all changes", 1003, 322, 280, 78, 14
-  PUSHBUTTON      "Close", IDCANCEL, 406, 280, 58, 14
+  CONTROL         "", 1001, "ListBox", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_TABSTOP, 4, 6, 100, 288
+  LTEXT           "", 1004, 110, 4, 370, 20
+  LTEXT           "Changes show on the dock as you make them.", 1002, 110, 277, 216, 18
+  PUSHBUTTON      "Revert all changes", 1003, 330, 280, 88, 14
+  PUSHBUTTON      "Close", IDCANCEL, 422, 280, 58, 14
 END
 
 // Items: every item on the dock, and the selected one's properties.
@@ -63,57 +65,61 @@ BEGIN
   PUSHBUTTON      "Up", 1104, 48, 231, 45, 14
   PUSHBUTTON      "Down", 1105, 95, 231, 45, 14
 
-  LTEXT           "Name", -1, 150, 3, 50, 10
-  EDITTEXT        1110, 205, 1, 165, 13, ES_AUTOHSCROLL
-  LTEXT           "Target", -1, 150, 21, 50, 10
-  EDITTEXT        1111, 205, 19, 120, 13, ES_AUTOHSCROLL
+  LTEXT           "Name", -1, 150, 3, 56, 10
+  EDITTEXT        1110, 208, 1, 162, 13, ES_AUTOHSCROLL
+  LTEXT           "Target", -1, 150, 21, 56, 10
+  EDITTEXT        1111, 208, 19, 117, 13, ES_AUTOHSCROLL
   PUSHBUTTON      "Browse...", 1112, 328, 18, 42, 14
-  LTEXT           "Arguments", -1, 150, 39, 50, 10
-  EDITTEXT        1113, 205, 37, 165, 13, ES_AUTOHSCROLL
-  LTEXT           "Start in", -1, 150, 57, 50, 10
-  EDITTEXT        1114, 205, 55, 120, 13, ES_AUTOHSCROLL
+  LTEXT           "Arguments", -1, 150, 39, 56, 10
+  EDITTEXT        1113, 208, 37, 162, 13, ES_AUTOHSCROLL
+  LTEXT           "Start in", -1, 150, 57, 56, 10
+  EDITTEXT        1114, 208, 55, 117, 13, ES_AUTOHSCROLL
   PUSHBUTTON      "Browse...", 1115, 328, 54, 42, 14
-  LTEXT           "Run", -1, 150, 75, 50, 10
-  COMBOBOX        1116, 205, 73, 78, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Run", -1, 150, 75, 56, 10
+  COMBOBOX        1116, 208, 73, 76, 60, CBS_DROPDOWNLIST | WS_TABSTOP
   PUSHBUTTON      "Open file location", 1122, 287, 72, 83, 14
-  AUTOCHECKBOX    "Run as administrator", 1117, 205, 91, 120, 12
-  LTEXT           "Icon", -1, 150, 113, 50, 10
-  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 205, 109, 40, 40
-  PUSHBUTTON      "Change...", 1119, 252, 110, 64, 14
-  PUSHBUTTON      "Default icon", 1120, 252, 127, 64, 14
-  LTEXT           "", 1121, 150, 158, 220, 40
+  AUTOCHECKBOX    "Run as administrator", 1117, 208, 91, 162, 12
+  LTEXT           "Icon", -1, 150, 113, 56, 10
+  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 208, 109, 40, 40
+  PUSHBUTTON      "Change...", 1119, 255, 110, 72, 14
+  PUSHBUTTON      "Default icon", 1120, 255, 127, 72, 14
+  LTEXT           "When clicked", -1, 150, 159, 56, 10
+  COMBOBOX        1123, 208, 157, 162, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "", 1121, 150, 176, 220, 40
 END
 
 // One item's properties (right-click an icon > Properties...). The same control numbers as the
 // Items page, so the same code fills and saves them. The title becomes "<name> properties".
-102 DIALOGEX 0, 0, 236, 214
+102 DIALOGEX 0, 0, 236, 232
 STYLE DS_SHELLFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Properties"
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
-  LTEXT           "Name", -1, 7, 9, 50, 10
-  EDITTEXT        1110, 62, 7, 167, 13, ES_AUTOHSCROLL
-  LTEXT           "Target", -1, 7, 27, 50, 10
-  EDITTEXT        1111, 62, 25, 122, 13, ES_AUTOHSCROLL
+  LTEXT           "Name", -1, 7, 9, 56, 10
+  EDITTEXT        1110, 65, 7, 164, 13, ES_AUTOHSCROLL
+  LTEXT           "Target", -1, 7, 27, 56, 10
+  EDITTEXT        1111, 65, 25, 119, 13, ES_AUTOHSCROLL
   PUSHBUTTON      "Browse...", 1112, 187, 24, 42, 14
-  LTEXT           "Arguments", -1, 7, 45, 50, 10
-  EDITTEXT        1113, 62, 43, 167, 13, ES_AUTOHSCROLL
-  LTEXT           "Start in", -1, 7, 63, 50, 10
-  EDITTEXT        1114, 62, 61, 122, 13, ES_AUTOHSCROLL
+  LTEXT           "Arguments", -1, 7, 45, 56, 10
+  EDITTEXT        1113, 65, 43, 164, 13, ES_AUTOHSCROLL
+  LTEXT           "Start in", -1, 7, 63, 56, 10
+  EDITTEXT        1114, 65, 61, 119, 13, ES_AUTOHSCROLL
   PUSHBUTTON      "Browse...", 1115, 187, 60, 42, 14
-  LTEXT           "Run", -1, 7, 81, 50, 10
-  COMBOBOX        1116, 62, 79, 78, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Run", -1, 7, 81, 56, 10
+  COMBOBOX        1116, 65, 79, 78, 60, CBS_DROPDOWNLIST | WS_TABSTOP
   PUSHBUTTON      "Open file location", 1122, 146, 78, 83, 14
-  AUTOCHECKBOX    "Run as administrator", 1117, 62, 97, 120, 12
-  LTEXT           "Icon", -1, 7, 119, 50, 10
-  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 62, 115, 40, 40
-  PUSHBUTTON      "Change...", 1119, 109, 116, 64, 14
-  PUSHBUTTON      "Default icon", 1120, 109, 133, 64, 14
-  LTEXT           "", 1121, 7, 160, 222, 10, SS_PATHELLIPSIS
-  LTEXT           "Changes show on the dock as you make them.", 1002, 7, 174, 222, 18
-  PUSHBUTTON      "Revert", 1003, 126, 194, 50, 14
-  PUSHBUTTON      "Close", IDCANCEL, 179, 194, 50, 14
+  AUTOCHECKBOX    "Run as administrator", 1117, 65, 97, 164, 12
+  LTEXT           "Icon", -1, 7, 119, 56, 10
+  CONTROL         "", 1118, "Static", SS_OWNERDRAW, 65, 115, 40, 40
+  PUSHBUTTON      "Change...", 1119, 112, 116, 72, 14
+  PUSHBUTTON      "Default icon", 1120, 112, 133, 72, 14
+  LTEXT           "When clicked", -1, 7, 162, 56, 10
+  COMBOBOX        1123, 65, 160, 164, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "", 1121, 7, 178, 222, 10, SS_PATHELLIPSIS
+  LTEXT           "Changes show on the dock as you make them.", 1002, 7, 192, 222, 18
+  PUSHBUTTON      "Revert", 1003, 126, 212, 50, 14
+  PUSHBUTTON      "Close", IDCANCEL, 179, 212, 50, 14
 END
 
 // Look: the dock's sizes and appearance, under headings (1098: drawn semibold). Sliders show
@@ -123,38 +129,38 @@ STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
   LTEXT           "Size", 1098, 0, 0, 300, 11
-  LTEXT           "Icon size", -1, 0, 16, 84, 10
-  CONTROL         "", 1301, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 13, 220, 16
+  LTEXT           "Icon size", -1, 0, 16, 92, 10
+  CONTROL         "", 1301, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 13, 212, 16
   LTEXT           "", 1302, 310, 16, 60, 10
-  LTEXT           "Zoom size", -1, 0, 34, 84, 10
-  CONTROL         "", 1303, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 31, 220, 16
+  LTEXT           "Zoom size", -1, 0, 34, 92, 10
+  CONTROL         "", 1303, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 31, 212, 16
   LTEXT           "", 1304, 310, 34, 60, 10
-  LTEXT           "Spacing", -1, 0, 52, 84, 10
-  CONTROL         "", 1305, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 49, 220, 16
+  LTEXT           "Spacing", -1, 0, 52, 92, 10
+  CONTROL         "", 1305, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 49, 212, 16
   LTEXT           "", 1306, 310, 52, 60, 10
   LTEXT           "Names", 1098, 0, 70, 300, 11
-  LTEXT           "Show names", -1, 0, 85, 84, 10
-  COMBOBOX        1307, 90, 83, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-  LTEXT           "Name size", -1, 0, 100, 84, 10
-  CONTROL         "", 1308, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 97, 220, 16
+  LTEXT           "Show names", -1, 0, 85, 92, 10
+  COMBOBOX        1307, 96, 83, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Name size", -1, 0, 100, 92, 10
+  CONTROL         "", 1308, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 97, 212, 16
   LTEXT           "", 1309, 310, 100, 60, 10
   LTEXT           "Appearance", 1098, 0, 118, 300, 11
-  LTEXT           "Background opacity", -1, 0, 134, 84, 10
-  CONTROL         "", 1310, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 131, 220, 16
+  LTEXT           "Background opacity", -1, 0, 134, 92, 10
+  CONTROL         "", 1310, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 131, 212, 16
   LTEXT           "", 1311, 310, 134, 60, 10
-  LTEXT           "Icon opacity", -1, 0, 152, 84, 10
-  CONTROL         "", 1312, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 149, 220, 16
+  LTEXT           "Icon opacity", -1, 0, 152, 92, 10
+  CONTROL         "", 1312, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 149, 212, 16
   LTEXT           "", 1313, 310, 152, 60, 10
-  LTEXT           "Style", -1, 0, 170, 84, 10
-  COMBOBOX        1315, 90, 168, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Style", -1, 0, 170, 92, 10
+  COMBOBOX        1315, 96, 168, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
   LTEXT           "Language", -1, 192, 170, 40, 10
   COMBOBOX        1317, 236, 168, 134, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
   LTEXT           "Effects", 1098, 0, 188, 300, 11
-  LTEXT           "Hover glow", -1, 0, 204, 84, 10
-  COMBOBOX        1316, 90, 202, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-  LTEXT           "Launch effect", -1, 0, 222, 84, 10
-  COMBOBOX        1314, 90, 220, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-  LTEXT           "Sizes are saved when you let go of the slider. The icon you point at is always fully solid.", -1, 0, 237, 365, 9
+  LTEXT           "Hover glow", -1, 0, 204, 92, 10
+  COMBOBOX        1316, 96, 202, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Launch effect", -1, 0, 222, 92, 10
+  COMBOBOX        1314, 96, 220, 130, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Sizes are saved when you let go of the slider. The icon you point at is always fully solid.", -1, 0, 236, 365, 10
 END
 
 // Behaviour: timings, double click, Lock icons, Start with Windows, under headings.
@@ -163,55 +169,61 @@ STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
   LTEXT           "Timing", 1098, 0, 0, 300, 11
-  LTEXT           "Show after", -1, 0, 16, 84, 10
-  CONTROL         "", 1401, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 13, 220, 16
+  LTEXT           "Show after", -1, 0, 16, 92, 10
+  CONTROL         "", 1401, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 13, 212, 16
   LTEXT           "", 1402, 310, 16, 60, 10
-  LTEXT           "Hide after", -1, 0, 34, 84, 10
-  CONTROL         "", 1403, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 31, 220, 16
+  LTEXT           "Hide after", -1, 0, 34, 92, 10
+  CONTROL         "", 1403, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 31, 212, 16
   LTEXT           "", 1404, 310, 34, 60, 10
-  LTEXT           "Slide in", -1, 0, 52, 84, 10
-  CONTROL         "", 1405, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 49, 220, 16
+  LTEXT           "Slide in", -1, 0, 52, 92, 10
+  CONTROL         "", 1405, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 49, 212, 16
   LTEXT           "", 1406, 310, 52, 60, 10
-  LTEXT           "Slide out", -1, 0, 70, 84, 10
-  CONTROL         "", 1407, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 67, 220, 16
+  LTEXT           "Slide out", -1, 0, 70, 92, 10
+  CONTROL         "", 1407, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 67, 212, 16
   LTEXT           "", 1408, 310, 70, 60, 10
-  LTEXT           "Zoom time", -1, 0, 88, 84, 10
-  CONTROL         "", 1409, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 86, 85, 220, 16
+  LTEXT           "Zoom time", -1, 0, 88, 92, 10
+  CONTROL         "", 1409, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 94, 85, 212, 16
   LTEXT           "", 1410, 310, 88, 60, 10
   LTEXT           "Show after: how long the pointer rests at the screen's edge before the dock comes out. Hide after: how long it stays once the pointer leaves. Set 0 for no delay.", -1, 0, 104, 365, 20
   LTEXT           "Clicking, editing and startup", 1098, 0, 130, 300, 11
-  AUTOCHECKBOX    "Open items with a double click", 1414, 90, 145, 200, 12
-  AUTOCHECKBOX    "Lock icons", 1411, 90, 160, 200, 12
-  LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 102, 173, 263, 18
-  AUTOCHECKBOX    "Start with Windows", 1412, 90, 194, 200, 12
+  AUTOCHECKBOX    "Open items with a double click", 1414, 96, 145, 200, 12
+  AUTOCHECKBOX    "Lock icons", 1411, 96, 160, 200, 12
+  LTEXT           "No moving, removing or adding icons by dragging. Hold Ctrl to move one anyway.", -1, 108, 173, 257, 20
+  AUTOCHECKBOX    "Start with Windows", 1412, 96, 194, 200, 12
   LTEXT           "When you're not using it", 1098, 0, 213, 300, 11
-  LTEXT           "The dock", -1, 0, 230, 84, 10
-  COMBOBOX        1413, 90, 228, 160, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "The dock", -1, 0, 230, 92, 10
+  COMBOBOX        1413, 96, 228, 160, 60, CBS_DROPDOWNLIST | WS_TABSTOP
 END
 
 // Screen: which screen the dock is on, what to know about its top edge, what happens when the
-// icons don't fit along it, and a keyboard shortcut that brings the dock out.
+// icons don't fit along it, a keyboard shortcut that brings the dock out, and how big a folder's
+// grid of what's inside is.
 112 DIALOGEX 0, 0, 370, 246
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
   LTEXT           "Where the dock is", 1098, 0, 0, 300, 11
-  LTEXT           "Show the dock on", -1, 0, 17, 84, 10
-  COMBOBOX        2101, 90, 14, 220, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-  LTEXT           "Screen edge", -1, 0, 35, 84, 10
-  COMBOBOX        2106, 90, 32, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-  PUSHBUTTON      "Taskbar settings...", 2107, 186, 31, 90, 14
-  LTEXT           "", 2102, 90, 50, 275, 30
+  LTEXT           "Show the dock on", -1, 0, 17, 92, 10
+  COMBOBOX        2101, 96, 14, 220, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+  LTEXT           "Screen edge", -1, 0, 35, 92, 10
+  COMBOBOX        2106, 96, 32, 90, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  PUSHBUTTON      "Taskbar settings...", 2107, 192, 31, 90, 14
+  LTEXT           "", 2102, 96, 50, 269, 30
   LTEXT           "When the icons don't fit", 1098, 0, 86, 300, 11
-  LTEXT           "The icons", -1, 0, 103, 84, 10
-  COMBOBOX        2108, 90, 100, 200, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-  LTEXT           "Scrolling: the arrows at the ends of the dock move along, and so does the mouse wheel.", -1, 90, 117, 275, 18
-  LTEXT           "Keyboard shortcut", 1098, 0, 142, 300, 11
-  LTEXT           "Show the dock with", -1, 0, 159, 84, 10
-  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 90, 157, 140, 12
-  PUSHBUTTON      "Clear", 2104, 236, 156, 50, 14
-  LTEXT           "", 2105, 90, 174, 275, 20
-  LTEXT           "Press the shortcut again, or Esc, to send the dock back. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 196, 365, 20
+  LTEXT           "The icons", -1, 0, 103, 92, 10
+  COMBOBOX        2108, 96, 100, 200, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+  LTEXT           "Scrolling: the arrows at the ends of the dock move along, and so does the mouse wheel.", -1, 96, 117, 269, 20
+  LTEXT           "Keyboard shortcut", 1098, 0, 140, 300, 11
+  LTEXT           "Show the dock with", -1, 0, 156, 92, 10
+  CONTROL         "", 2103, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 96, 154, 140, 12
+  PUSHBUTTON      "Clear", 2104, 242, 153, 50, 14
+  LTEXT           "", 2105, 96, 169, 269, 20
+  LTEXT           "Press the shortcut again, or Esc, to send the dock back. A shortcut needs Ctrl or Alt, so nothing you type is caught by mistake.", -1, 0, 189, 365, 20
+  LTEXT           "Folders that show what's inside", 1098, 0, 214, 300, 11
+  LTEXT           "Columns", -1, 0, 231, 92, 10
+  COMBOBOX        2109, 96, 229, 40, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+  LTEXT           "Rows", -1, 146, 231, 50, 10
+  COMBOBOX        2110, 200, 229, 40, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
 // Recently removed: the last 20 items taken off the dock; put one back, or forget them.
@@ -219,11 +231,11 @@ END
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
-  LTEXT           "Items you removed, newest first (the last 20). Put one back and it returns where it was, in its group if it was in one.", -1, 0, 0, 365, 18
-  CONTROL         "", 1501, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 22, 370, 200
-  PUSHBUTTON      "Put back", 1502, 0, 228, 60, 14
-  PUSHBUTTON      "Forget", 1503, 64, 228, 60, 14
-  PUSHBUTTON      "Clear the list", 1504, 128, 228, 66, 14
+  LTEXT           "Items you removed, newest first (the last 20). Put one back and it returns where it was, in its group if it was in one.", -1, 0, 0, 365, 20
+  CONTROL         "", 1501, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 24, 370, 198
+  PUSHBUTTON      "Put back", 1502, 0, 228, 70, 14
+  PUSHBUTTON      "Forget", 1503, 74, 228, 60, 14
+  PUSHBUTTON      "Clear the list", 1504, 138, 228, 70, 14
 END
 
 // Versions: dock.toml's backups, to look back at and restore.
@@ -233,9 +245,9 @@ FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
   LTEXT           "Your dock is saved automatically before changes (the last 20, at most one a minute) and once a day (the last 7). Snapshots are kept until you delete them from the backups folder. Before restoring, your current dock is saved as a snapshot.", -1, 0, 0, 365, 28
   CONTROL         "", 1601, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 30, 370, 192
-  PUSHBUTTON      "Restore", 1602, 0, 228, 60, 14
-  PUSHBUTTON      "Save a snapshot", 1603, 64, 228, 76, 14
-  PUSHBUTTON      "Open backups folder", 1604, 144, 228, 88, 14
+  PUSHBUTTON      "Restore", 1602, 0, 228, 70, 14
+  PUSHBUTTON      "Save a snapshot", 1603, 74, 228, 90, 14
+  PUSHBUTTON      "Open backups folder", 1604, 168, 228, 110, 14
 END
 
 // Files: where the dock keeps its things.
@@ -252,10 +264,10 @@ BEGIN
   PUSHBUTTON      "Clear icon cache", 1706, 84, 62, 92, 14
   LTEXT           "The dock remakes icons as it needs them.", -1, 180, 65, 188, 10
   LTEXT           "Move your dock", 1098, 0, 96, 300, 11
-  LTEXT           "Save a copy of your dock's items and settings, to keep or to use on another PC, and load one back in (your dock as it is now is kept in Versions first). Coming from RocketDock? Bring its icons and settings over.", -1, 0, 111, 365, 20
-  PUSHBUTTON      "Save a copy...", 1707, 0, 134, 80, 14
-  PUSHBUTTON      "Load a copy...", 1708, 84, 134, 80, 14
-  PUSHBUTTON      "Import from RocketDock...", 1709, 168, 134, 110, 14
+  LTEXT           "Save a copy of your dock's items and settings, to keep or to use on another PC, and load one back in (your dock as it is now is kept in Versions first). Coming from RocketDock? Bring its icons and settings over.", -1, 0, 111, 365, 28
+  PUSHBUTTON      "Save a copy...", 1707, 0, 142, 96, 14
+  PUSHBUTTON      "Load a copy...", 1708, 100, 142, 96, 14
+  PUSHBUTTON      "Import from RocketDock...", 1709, 200, 142, 120, 14
 END
 
 // The icon picker: a grid of icons (your icons folder, the program's, Windows'), with a search.
@@ -265,15 +277,15 @@ STYLE DS_SHELLFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSM
 CAPTION "Choose an icon"
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
-  LTEXT           "Show", -1, 7, 9, 24, 10
-  COMBOBOX        1801, 34, 7, 170, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-  LTEXT           "Search", -1, 222, 9, 28, 10
+  LTEXT           "Show", -1, 7, 9, 32, 10
+  COMBOBOX        1801, 42, 7, 162, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+  LTEXT           "Search", -1, 214, 9, 36, 10
   EDITTEXT        1802, 252, 7, 141, 13, ES_AUTOHSCROLL
   CONTROL         "", 1803, "SysListView32", LVS_ICON | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_AUTOARRANGE | WS_BORDER | WS_TABSTOP, 7, 26, 386, 188
   LTEXT           "", 1806, 7, 219, 386, 10, SS_ENDELLIPSIS
   PUSHBUTTON      "Browse...", 1804, 7, 239, 60, 14
-  PUSHBUTTON      "Default icon", 1805, 71, 239, 64, 14
-  DEFPUSHBUTTON   "Use this icon", IDOK, 280, 239, 60, 14
+  PUSHBUTTON      "Default icon", 1805, 71, 239, 72, 14
+  DEFPUSHBUTTON   "Use this icon", IDOK, 263, 239, 77, 14
   PUSHBUTTON      "Cancel", IDCANCEL, 343, 239, 50, 14
 END
 

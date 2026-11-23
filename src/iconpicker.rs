@@ -175,6 +175,7 @@ unsafe extern "system" fn picker_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     match msg {
         WM_INITDIALOG => {
             crate::text::translate_dialog(hwnd);
+            crate::chrome::style_body(hwnd);
             with_picker(|p| p.start(hwnd));
             if let Ok(list) = unsafe { GetDlgItem(Some(hwnd), IDC_ICONS) } {
                 unsafe {
